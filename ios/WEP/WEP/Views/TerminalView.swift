@@ -3,6 +3,7 @@ import SwiftUI
 struct TerminalView: View {
     @EnvironmentObject var appState: AppState
     @State private var commandInput = ""
+    @FocusState private var isCommandFocused: Bool
 
     private let quickCommands = ["git status", "git log -n 5 --oneline", "ls", "dotnet --version", "node -v"]
 
@@ -27,11 +28,17 @@ struct TerminalView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(AgyTheme.bgSidebar)
+            .onTapGesture {
+                isCommandFocused = false
+                hideKeyboard()
+            }
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(quickCommands, id: \.self) { cmd in
                         Button(cmd) {
+                            isCommandFocused = false
+                            hideKeyboard()
                             Task { await appState.runTerminalCommand(cmd) }
                         }
                         .font(.system(size: 11, design: .monospaced))
@@ -94,6 +101,12 @@ struct TerminalView: View {
                     }
                     .padding(12)
                 }
+                .scrollDismissesKeyboard(.interactively)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isCommandFocused = false
+                    hideKeyboard()
+                }
                 .onChange(of: appState.terminalLogs.count) { _, _ in
                     if let lastId = appState.terminalLogs.last?.id {
                         withAnimation { proxy.scrollTo(lastId, anchor: .bottom) }
@@ -107,12 +120,27 @@ struct TerminalView: View {
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
                     .foregroundColor(AgyTheme.accentIndigo)
                 TextField("Enter PowerShell command...", text: $commandInput)
+                    .focused($isCommandFocused)
                     .font(.system(size: 13.5, design: .monospaced))
                     .foregroundColor(AgyTheme.textPrimary)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .submitLabel(.send)
                     .onSubmit { runCurrent() }
+
+                if isCommandFocused {
+                    Button {
+                        isCommandFocused = false
+                        hideKeyboard()
+                    } label: {
+                        Image(systemName: "keyboard.chevron.compact.down")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(AgyTheme.accentCyan)
+                            .frame(width: 32, height: 32)
+                            .background(AgyTheme.bgElevated)
+                            .cornerRadius(8)
+                    }
+                }
 
                 if appState.isRunningCommand {
                     ProgressView().tint(AgyTheme.accentCyan)
@@ -139,6 +167,8 @@ struct TerminalView: View {
     private func runCurrent() {
         let cmd = commandInput
         commandInput = ""
+        isCommandFocused = false
+        hideKeyboard()
         Task { await appState.runTerminalCommand(cmd) }
     }
 }

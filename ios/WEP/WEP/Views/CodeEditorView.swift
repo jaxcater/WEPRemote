@@ -124,7 +124,23 @@ struct CodeEditorView: View {
                     .cornerRadius(7)
             }
 
+            if isFocused {
+                Button {
+                    isFocused = false
+                    hideKeyboard()
+                } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(AgyTheme.accentCyan)
+                        .frame(width: 30, height: 30)
+                        .background(AgyTheme.bgElevated)
+                        .cornerRadius(7)
+                }
+            }
+
             Button {
+                isFocused = false
+                hideKeyboard()
                 Task { await appState.saveCurrentFile() }
             } label: {
                 HStack(spacing: 4) {
@@ -150,36 +166,44 @@ struct CodeEditorView: View {
     }
 
     private var codingAccessoryBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                Button("Done") {
-                    isFocused = false
+        HStack(spacing: 8) {
+            Button {
+                isFocused = false
+                hideKeyboard()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                    Text("Ẩn")
                 }
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(AgyTheme.accentCyan)
+                .foregroundColor(.white)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(AgyTheme.bgElevated)
+                .background(AgyTheme.accentIndigo)
                 .cornerRadius(6)
+            }
 
-                ForEach(quickSymbols, id: \.self) { sym in
-                    Button {
-                        appState.editorContent += sym
-                    } label: {
-                        Text(sym == "    " ? "Tab" : sym)
-                            .font(.system(size: 13, weight: .medium, design: .monospaced))
-                            .foregroundColor(AgyTheme.textPrimary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(AgyTheme.bgCard)
-                            .cornerRadius(6)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(AgyTheme.borderSubtle, lineWidth: 1))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(quickSymbols, id: \.self) { sym in
+                        Button {
+                            appState.editorContent += sym
+                        } label: {
+                            Text(sym == "    " ? "Tab" : sym)
+                                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                .foregroundColor(AgyTheme.textPrimary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(AgyTheme.bgCard)
+                                .cornerRadius(6)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(AgyTheme.borderSubtle, lineWidth: 1))
+                        }
                     }
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background(AgyTheme.bgSidebar)
         .overlay(Rectangle().frame(height: 1).foregroundColor(AgyTheme.borderSubtle), alignment: .top)
     }

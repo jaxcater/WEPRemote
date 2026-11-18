@@ -120,12 +120,24 @@ struct PairingView: View {
                 }
             }
             .scrollContentBackground(.hidden)
+            .scrollDismissesKeyboard(.interactively)
             .background(AgyTheme.bgCanvas)
             .navigationTitle("Pair Windows Host")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("Close") {
+                        hideKeyboard()
+                        dismiss()
+                    }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button {
+                        hideKeyboard()
+                    } label: {
+                        Label("Ẩn bàn phím", systemImage: "keyboard.chevron.compact.down")
+                    }
                 }
             }
             .sheet(isPresented: $showQrScanner) {

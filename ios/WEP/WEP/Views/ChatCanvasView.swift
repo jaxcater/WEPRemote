@@ -7,6 +7,7 @@ struct ChatCanvasView: View {
     @State private var attachedFiles: [String] = []
     @State private var showFileMentionSheet = false
     @State private var showSlashMenu = false
+    @FocusState private var isPromptFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,6 +44,12 @@ struct ChatCanvasView: View {
                         }
                         .padding(14)
                     }
+                    .scrollDismissesKeyboard(.interactively)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        isPromptFocused = false
+                        hideKeyboard()
+                    }
                     .onChange(of: session.turns.last?.responseText) { _, _ in
                         if let lastId = session.turns.last?.id {
                             withAnimation(.easeOut(duration: 0.15)) {
@@ -53,6 +60,12 @@ struct ChatCanvasView: View {
                 }
             } else {
                 emptyStudioCanvas
+                    .scrollDismissesKeyboard(.interactively)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        isPromptFocused = false
+                        hideKeyboard()
+                    }
             }
 
             if showSlashMenu {
@@ -330,6 +343,7 @@ struct ChatCanvasView: View {
             // Input Box
             VStack(spacing: 8) {
                 TextField("Ask \(appState.selectedEngine.displayName) to edit, debug, or build...", text: $promptText, axis: .vertical)
+                    .focused($isPromptFocused)
                     .lineLimit(1...6)
                     .font(.system(size: 14.5))
                     .foregroundColor(AgyTheme.textPrimary)
@@ -338,6 +352,8 @@ struct ChatCanvasView: View {
 
                 HStack(spacing: 8) {
                     Button {
+                        isPromptFocused = false
+                        hideKeyboard()
                         showFileMentionSheet = true
                     } label: {
                         Text("@")
@@ -386,6 +402,20 @@ struct ChatCanvasView: View {
 
                     Spacer()
 
+                    if isPromptFocused {
+                        Button {
+                            isPromptFocused = false
+                            hideKeyboard()
+                        } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(AgyTheme.accentCyan)
+                                .frame(width: 32, height: 32)
+                                .background(AgyTheme.bgElevated)
+                                .clipShape(Circle())
+                        }
+                    }
+
                     if appState.currentTurnIsRunning {
                         Button {
                             Task { await appState.cancelActiveTurn() }
@@ -404,6 +434,8 @@ struct ChatCanvasView: View {
                             promptText = ""
                             attachedFiles = []
                             showSlashMenu = false
+                            isPromptFocused = false
+                            hideKeyboard()
                             Task { await appState.sendPrompt(toSend, attachedFiles: files) }
                         } label: {
                             Image(systemName: "arrow.up")
@@ -651,13 +683,25 @@ struct FileMentionPickerSheet: View {
                     .listRowBackground(AgyTheme.bgCard)
                 }
                 .scrollContentBackground(.hidden)
+                .scrollDismissesKeyboard(.interactively)
             }
             .background(AgyTheme.bgCanvas)
             .navigationTitle("@ Mention File")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("Close") {
+                        hideKeyboard()
+                        dismiss()
+                    }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button {
+                        hideKeyboard()
+                    } label: {
+                        Label("Ẩn bàn phím", systemImage: "keyboard.chevron.compact.down")
+                    }
                 }
             }
             .task { await load() }

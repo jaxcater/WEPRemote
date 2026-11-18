@@ -4,46 +4,66 @@ struct MainShellView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            AgyTheme.bgCanvas.ignoresSafeArea()
+        NavigationStack {
+            ZStack(alignment: .leading) {
+                AgyTheme.bgCanvas.ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                topStudioBar
-                Divider().background(AgyTheme.borderSubtle)
+                VStack(spacing: 0) {
+                    topStudioBar
+                    Divider().background(AgyTheme.borderSubtle)
 
-                Group {
-                    switch appState.activeTab {
-                    case .chat:
-                        ChatCanvasView()
-                    case .explorer:
-                        FileExplorerView()
-                    case .code:
-                        CodeEditorView()
-                    case .extensions:
-                        ExtensionsView()
-                    case .terminal:
-                        TerminalView()
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                bottomSurfaceSwitcher
-            }
-
-            if appState.showSidebar {
-                Color.black.opacity(0.58)
-                    .ignoresSafeArea()
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
-                            appState.showSidebar = false
+                    Group {
+                        switch appState.activeTab {
+                        case .chat:
+                            ChatCanvasView()
+                        case .explorer:
+                            FileExplorerView()
+                        case .code:
+                            CodeEditorView()
+                        case .extensions:
+                            ExtensionsView()
+                        case .terminal:
+                            TerminalView()
                         }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                SidebarView()
-                    .frame(width: 312)
-                    .transition(.move(edge: .leading))
-                    .zIndex(2)
+                    bottomSurfaceSwitcher
+                }
+
+                if appState.showSidebar {
+                    Color.black.opacity(0.58)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            hideKeyboard()
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                                appState.showSidebar = false
+                            }
+                        }
+
+                    SidebarView()
+                        .frame(width: 312)
+                        .transition(.move(edge: .leading))
+                        .zIndex(2)
+                }
             }
+            .toolbar(.hidden, for: .navigationBar)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    if appState.activeTab != .code {
+                        Spacer()
+                        Button {
+                            hideKeyboard()
+                        } label: {
+                            Label("Ẩn bàn phím", systemImage: "keyboard.chevron.compact.down")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                    }
+                }
+            }
+        }
+        .onChange(of: appState.activeTab) { _, _ in
+            hideKeyboard()
         }
         .sheet(isPresented: $appState.showAuxiliaryPane) {
             AuxiliaryPaneView()
@@ -65,6 +85,7 @@ struct MainShellView: View {
     private var topStudioBar: some View {
         HStack(spacing: 8) {
             Button {
+                hideKeyboard()
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
                     appState.showSidebar.toggle()
                 }

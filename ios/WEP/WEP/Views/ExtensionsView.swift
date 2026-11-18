@@ -6,6 +6,7 @@ struct ExtensionsView: View {
     @State private var searchQuery = ""
     @State private var installId = ""
     @State private var sourceFilter = "all"
+    @FocusState private var isInputFocused: Bool
 
     private var filteredExtensions: [ExtensionItem] {
         appState.extensions.filter { item in
@@ -43,6 +44,7 @@ struct ExtensionsView: View {
 
                 HStack(spacing: 8) {
                     TextField("Install Cursor extension (publisher.name)...", text: $installId)
+                        .focused($isInputFocused)
                         .font(.system(size: 13, design: .monospaced))
                         .foregroundColor(AgyTheme.textPrimary)
                         .autocorrectionDisabled()
@@ -56,6 +58,8 @@ struct ExtensionsView: View {
                     Button("Install") {
                         let id = installId
                         installId = ""
+                        isInputFocused = false
+                        hideKeyboard()
                         Task { await appState.installExtension(id: id) }
                     }
                     .font(.system(size: 13, weight: .semibold))
@@ -69,12 +73,27 @@ struct ExtensionsView: View {
 
                 HStack(spacing: 8) {
                     TextField("Filter installed...", text: $searchQuery)
+                        .focused($isInputFocused)
                         .font(.system(size: 12.5))
                         .foregroundColor(AgyTheme.textPrimary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(AgyTheme.bgInput)
                         .cornerRadius(8)
+
+                    if isInputFocused {
+                        Button {
+                            isInputFocused = false
+                            hideKeyboard()
+                        } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(AgyTheme.accentCyan)
+                                .frame(width: 30, height: 30)
+                                .background(AgyTheme.bgElevated)
+                                .cornerRadius(7)
+                        }
+                    }
 
                     Picker("Source", selection: $sourceFilter) {
                         Text("All").tag("all")
@@ -166,6 +185,13 @@ struct ExtensionsView: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .scrollDismissesKeyboard(.interactively)
+                .onTapGesture {
+                    if isInputFocused {
+                        isInputFocused = false
+                        hideKeyboard()
+                    }
+                }
                 .refreshable {
                     await appState.refreshExtensions()
                 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum AgyTheme {
     static let bgCanvas = Color(hex: 0x090B10)
@@ -43,4 +44,9 @@ extension Color {
             opacity: alpha
         )
     }
+}
+
+@MainActor
+func hideKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
 }
