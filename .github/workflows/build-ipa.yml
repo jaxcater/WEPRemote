@@ -11,7 +11,7 @@ permissions:
 jobs:
   build-ios-ipa:
     name: Build Unsigned WEP.ipa (macOS Xcode)
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -51,7 +51,6 @@ jobs:
           zip -qry ../WEP.ipa Payload
           cd ..
           ls -lh WEP.ipa
-          unzip -l WEP.ipa | head -n 25
 
       - name: Upload WEP.ipa Artifact
         uses: actions/upload-artifact@v4
@@ -60,21 +59,8 @@ jobs:
           path: ios/WEP/WEP.ipa
           retention-days: 90
 
-      - name: Publish WEP.ipa to GitHub Release (latest)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: WEP iOS Latest Build
-          body: |
-            Automated unsigned/ad-hoc **WEP.ipa** build for iOS 17+.
-            Install on iPhone via **Sideloadly**, **AltStore**, **SideStore**, or **TrollStore**.
-          files: ios/WEP/WEP.ipa
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build-windows-host:
-    name: Verify WEP.Host (Windows .NET 9)
+    name: Build WEP.Host.exe (Windows .NET 9)
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -85,12 +71,44 @@ jobs:
         with:
           dotnet-version: "9.0.x"
 
-      - name: Build & Publish WEP.Host
-        run: dotnet publish windows/WEP.Host/WEP.Host.csproj -c Release -r win-x64 --self-contained false -o dist/WEP.Host
+      - name: Publish Single-File WEP.Host.exe
+        run: dotnet publish windows/WEP.Host/WEP.Host.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/WEP.Host
 
       - name: Upload WEP.Host Artifact
         uses: actions/upload-artifact@v4
         with:
           name: WEP-Host-win-x64
-          path: dist/WEP.Host
-          retention-days: 30
+          path: dist/WEP.Host/WEP.Host.exe
+          retention-days: 90
+
+  publish-release:
+    name: Publish Latest Release Assets
+    needs: [ build-ios-ipa, build-windows-host ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download WEP.ipa
+        uses: actions/download-artifact@v4
+        with:
+          name: WEP-ipa
+          path: release_assets
+
+      - name: Download WEP.Host.exe
+        uses: actions/download-artifact@v4
+        with:
+          name: WEP-Host-win-x64
+          path: release_assets
+
+      - name: Publish to GitHub Release (latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: WEP Latest Release (iOS IPA + Windows Host)
+          body: |
+            - **WEP.ipa**: Unsigned/ad-hoc iOS 17+ app (install via Sideloadly / AltStore / SideStore / TrollStore).
+            - **WEP.Host.exe**: Windows 10/11 gateway & Cloudflare Tunnel manager (requires .NET 9 Desktop Runtime).
+          files: |
+            release_assets/WEP.ipa
+            release_assets/WEP.Host.exe
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
