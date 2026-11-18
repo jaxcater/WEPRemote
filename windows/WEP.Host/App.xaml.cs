@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Threading;
 using System.Windows;
 using WEP.Host.Services;
 using Forms = System.Windows.Forms;
@@ -7,6 +8,13 @@ namespace WEP.Host;
 
 public partial class App : System.Windows.Application
 {
+    private const string SingleInstanceMutexName = @"Local\WEP_Host_SingleInstance_Mutex";
+    private const string ActivateEventName = @"Local\WEP_Host_Activate_Event";
+
+    private Mutex? _instanceMutex;
+    private EventWaitHandle? _activateEvent;
+    private CancellationTokenSource? _activateWatchCts;
+
     private ConfigService? _config;
     private LogService? _log;
     private SessionStore? _sessions;
@@ -19,11 +27,28 @@ public partial class App : System.Windows.Application
     private Forms.NotifyIcon? _trayIcon;
     private bool _isExiting;
 
-    protected override async void OnStartup(StartupEventArgs e)
+    protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
+        _instanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var createdNew);
+        if (!createdNew)
+        {
+            try
+            {
+                using var evt = EventWaitHandle.OpenExisting(ActivateEventName);
+                evt.Set();
+            }
+            catch { }
+            Shutdown();
+            return;
+        }
+
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
+
+        _activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivateEventName);
+        _activateWatchCts = new CancellationTokenSource();
+        StartActivateListener(_activateWatchCts.Token);
 
         _log = new LogService();
         _config = new ConfigService();
@@ -44,19 +69,66 @@ public partial class App : System.Windows.Application
             _mainWindow.Show();
         }
 
-        await _server.StartAsync();
+        _ = InitializeBackgroundServicesAsync();
+    }
 
-        if (_config.Current.StartTunnelOnLaunch && _config.Current.TunnelMode != "off")
+    private async Task InitializeBackgroundServicesAsync()
+    {
+        try
         {
-            _ = _tunnel.StartAsync();
+            if (_server != null)
+            {
+                await _server.StartAsync();
+            }
+
+            if (_agy != null)
+            {
+                _ = Task.Run(() => _agy.GetModelsAsync(false));
+            }
+
+            if (_config?.Current.StartTunnelOnLaunch == true &&
+                _config.Current.TunnelMode != "off" &&
+                _tunnel != null)
+            {
+                _ = _tunnel.StartAsync();
+            }
         }
+        catch (Exception ex)
+        {
+            _log?.Error("Startup", $"Background initialization error: {ex.Message}");
+        }
+    }
+
+    private void StartActivateListener(CancellationToken ct)
+    {
+        Task.Run(() =>
+        {
+            while (!ct.IsCancellationRequested && _activateEvent != null)
+            {
+                if (_activateEvent.WaitOne(500))
+                {
+                    Dispatcher.Invoke(ShowMainWindow);
+                }
+            }
+        }, ct);
     }
 
     private void SetupTrayIcon()
     {
+        Icon trayIco = SystemIcons.Application;
+        try
+        {
+            var streamInfo = GetResourceStream(new Uri("pack://application:,,,/Assets/wep.ico"));
+            if (streamInfo != null)
+            {
+                trayIco = new Icon(streamInfo.Stream);
+            }
+        }
+        catch { }
+
         _trayIcon = new Forms.NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = trayIco,
             Text = "WEP Host — Antigravity Remote Gateway",
             Visible = true
         };
@@ -107,6 +179,7 @@ public partial class App : System.Windows.Application
 
         try
         {
+            _activateWatchCts?.Cancel();
             _tunnel?.Stop();
             if (_server != null) await _server.StopAsync();
         }
@@ -117,6 +190,14 @@ public partial class App : System.Windows.Application
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
         }
+
+        try
+        {
+            _activateEvent?.Dispose();
+            _instanceMutex?.ReleaseMutex();
+            _instanceMutex?.Dispose();
+        }
+        catch { }
 
         Shutdown();
     }

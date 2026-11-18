@@ -9,8 +9,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>WEP.Host</AssemblyName>
     <RootNamespace>WEP.Host</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <ApplicationTitle>WEP Host — Antigravity Remote Gateway</ApplicationTitle>
+    <ApplicationIcon>Assets\wep.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,6 +20,10 @@
 
   <ItemGroup>
     <PackageReference Include="QRCoder" Version="1.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\wep.ico" />
   </ItemGroup>
 
 </Project>

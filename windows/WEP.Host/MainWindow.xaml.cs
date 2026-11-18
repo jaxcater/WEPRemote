@@ -20,6 +20,7 @@ public partial class MainWindow : Window
     private readonly AgyRunnerService _agy;
     private readonly TunnelService _tunnel;
     private readonly WebApiServer _server;
+    private string? _lastQrPayload;
 
     public MainWindow(
         ConfigService config,
@@ -104,16 +105,44 @@ public partial class MainWindow : Window
         LanUrlBox.Text = lanUrl;
 
         TunnelUrlBox.Text = string.IsNullOrWhiteSpace(_tunnel.PublicUrl)
-            ? (_tunnel.IsRunning ? "Negotiating Cloudflare edge..." : "Tunnel stopped (click Start Tunnel)")
+            ? (_tunnel.IsRunning || _tunnel.IsBusy ? _tunnel.Status : "Tunnel stopped (click Start Tunnel)")
             : _tunnel.PublicUrl;
 
         TunnelStatusText.Text = $"Tunnel: {_tunnel.Status}";
-        ToggleTunnelBtn.Content = _tunnel.IsRunning ? "Stop Tunnel" : "Start Tunnel";
+        ToggleTunnelBtn.Content = (_tunnel.IsRunning || _tunnel.IsBusy) ? "Stop Tunnel" : "Start Tunnel";
 
-        HeaderServerStatus.Text = _server.IsRunning ? $"Gateway Online (:{_config.Current.Port})" : "Gateway Offline";
-        ServerDot.Fill = _server.IsRunning
-            ? new SolidColorBrush(System.Windows.Media.Color.FromRgb(34, 197, 94))
-            : new SolidColorBrush(System.Windows.Media.Color.FromRgb(239, 68, 68));
+        if (_tunnel.DownloadPercent is int pct)
+        {
+            TunnelProgressBar.Visibility = Visibility.Visible;
+            TunnelProgressBar.IsIndeterminate = false;
+            TunnelProgressBar.Value = pct;
+        }
+        else if (_tunnel.IsBusy)
+        {
+            TunnelProgressBar.Visibility = Visibility.Visible;
+            TunnelProgressBar.IsIndeterminate = true;
+        }
+        else
+        {
+            TunnelProgressBar.Visibility = Visibility.Collapsed;
+            TunnelProgressBar.IsIndeterminate = false;
+        }
+
+        if (_server.IsRunning)
+        {
+            HeaderServerStatus.Text = $"Gateway Online (:{_config.Current.Port})";
+            ServerDot.Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(34, 197, 94));
+        }
+        else if (!string.IsNullOrEmpty(_server.LastError))
+        {
+            HeaderServerStatus.Text = $"Port {_config.Current.Port} Error";
+            ServerDot.Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(239, 68, 68));
+        }
+        else
+        {
+            HeaderServerStatus.Text = "Starting Gateway...";
+            ServerDot.Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(245, 158, 11));
+        }
 
         HeaderClientsBadge.Text = $"{_server.ConnectedClientsCount} iOS Connected";
         ActiveRunsText.Text = $"Active Agent Runs: {_agy.ActiveRunCount}";
@@ -127,28 +156,24 @@ public partial class MainWindow : Window
         try
         {
             var payloadJson = JsonSerializer.Serialize(_server.BuildPairingPayload(), JsonOptions);
-            QrCodeImage.Source = QrCodeService.GenerateQrBitmap(payloadJson);
+            if (!string.Equals(payloadJson, _lastQrPayload, StringComparison.Ordinal))
+            {
+                _lastQrPayload = payloadJson;
+                QrCodeImage.Source = QrCodeService.GenerateQrBitmap(payloadJson);
+            }
         }
         catch { }
     }
 
     private async void ToggleTunnel_Click(object sender, RoutedEventArgs e)
     {
-        if (_tunnel.IsRunning)
+        if (_tunnel.IsRunning || _tunnel.IsBusy)
         {
             _tunnel.Stop();
         }
         else
         {
-            ToggleTunnelBtn.IsEnabled = false;
-            try
-            {
-                await _tunnel.StartAsync();
-            }
-            finally
-            {
-                ToggleTunnelBtn.IsEnabled = true;
-            }
+            await _tunnel.StartAsync();
         }
         RefreshStatusUi();
     }

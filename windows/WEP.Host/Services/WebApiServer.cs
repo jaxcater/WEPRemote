@@ -31,8 +31,10 @@ public sealed class WebApiServer : IAsyncDisposable
 
     private readonly ConcurrentDictionary<string, WebSocket> _wsClients = new();
     private WebApplication? _app;
+    private string? _cachedLanUrl;
 
     public bool IsRunning { get; private set; }
+    public string? LastError { get; private set; }
     public int ConnectedClientsCount => _wsClients.Count;
 
     public event Action? ClientsChanged;
@@ -59,46 +61,62 @@ public sealed class WebApiServer : IAsyncDisposable
     public async Task StartAsync()
     {
         if (IsRunning) return;
+        LastError = null;
 
-        var builder = WebApplication.CreateBuilder();
-        builder.Logging.ClearProviders();
-        builder.WebHost.UseKestrel(opts =>
+        try
         {
-            opts.ListenAnyIP(_config.Current.Port);
-        });
-
-        var app = builder.Build();
-        app.UseWebSockets(new WebSocketOptions
-        {
-            KeepAliveInterval = TimeSpan.FromSeconds(20)
-        });
-
-        app.Use(async (ctx, next) =>
-        {
-            ctx.Response.Headers["X-WEP-Host"] = "1.0.0";
-            if (ctx.Request.Path.Equals("/api/health", StringComparison.OrdinalIgnoreCase))
+            await Task.Run(async () =>
             {
-                await next();
-                return;
-            }
+                RefreshLanUrl();
+                var builder = WebApplication.CreateSlimBuilder();
+                builder.Logging.ClearProviders();
+                builder.WebHost.UseKestrel(opts =>
+                {
+                    opts.ListenAnyIP(_config.Current.Port);
+                });
 
-            if (!IsAuthorized(ctx))
-            {
-                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                await ctx.Response.WriteAsJsonAsync(new { error = "Unauthorized. Invalid or missing WEP token." });
-                return;
-            }
+                var app = builder.Build();
+                app.UseWebSockets(new WebSocketOptions
+                {
+                    KeepAliveInterval = TimeSpan.FromSeconds(20)
+                });
 
-            await next();
-        });
+                app.Use(async (ctx, next) =>
+                {
+                    ctx.Response.Headers["X-WEP-Host"] = "1.1.0";
+                    if (ctx.Request.Path.Equals("/api/health", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await next();
+                        return;
+                    }
 
-        MapRoutes(app);
+                    if (!IsAuthorized(ctx))
+                    {
+                        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                        await ctx.Response.WriteAsJsonAsync(new { error = "Unauthorized. Invalid or missing WEP token." });
+                        return;
+                    }
 
-        await app.StartAsync();
-        _app = app;
-        IsRunning = true;
-        ServerStateChanged?.Invoke();
-        _log.Info("Server", $"WEP Host Gateway listening on http://0.0.0.0:{_config.Current.Port} (LAN: {GetLanUrl()})");
+                    await next();
+                });
+
+                MapRoutes(app);
+
+                await app.StartAsync();
+                _app = app;
+                IsRunning = true;
+            });
+
+            ServerStateChanged?.Invoke();
+            _log.Info("Server", $"WEP Host Gateway listening on http://0.0.0.0:{_config.Current.Port} (LAN: {GetLanUrl()})");
+        }
+        catch (Exception ex)
+        {
+            IsRunning = false;
+            LastError = ex.Message;
+            ServerStateChanged?.Invoke();
+            _log.Error("Server", $"Failed to start Gateway on port {_config.Current.Port}: {ex.Message}");
+        }
     }
 
     public async Task StopAsync()
@@ -129,6 +147,11 @@ public sealed class WebApiServer : IAsyncDisposable
 
     public string GetLanUrl()
     {
+        return _cachedLanUrl ?? RefreshLanUrl();
+    }
+
+    public string RefreshLanUrl()
+    {
         try
         {
             foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
@@ -146,14 +169,16 @@ public sealed class WebApiServer : IAsyncDisposable
                 {
                     if (ua.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ua.Address))
                     {
-                        return $"http://{ua.Address}:{_config.Current.Port}";
+                        _cachedLanUrl = $"http://{ua.Address}:{_config.Current.Port}";
+                        return _cachedLanUrl;
                     }
                 }
             }
         }
         catch { }
 
-        return $"http://127.0.0.1:{_config.Current.Port}";
+        _cachedLanUrl = $"http://127.0.0.1:{_config.Current.Port}";
+        return _cachedLanUrl;
     }
 
     public PairingPayload BuildPairingPayload()
