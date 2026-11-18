@@ -105,7 +105,7 @@ public sealed class SessionStore
                     session.IsRunning = false;
                     foreach (var t in session.Turns)
                     {
-                        if (t.Status == "running") t.Status = "interrupted";
+                        if (t.Status is "running" or "queued") t.Status = "interrupted";
                     }
                     _sessions[session.Id] = session;
                 }

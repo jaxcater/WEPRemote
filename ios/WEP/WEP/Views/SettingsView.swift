@@ -1,12 +1,43 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var notifications = NotificationManager.shared
     @Environment(\.dismiss) var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Background & Notifications") {
+                    Toggle("Allow Background Execution", isOn: $appState.backgroundExecutionEnabled)
+                    Toggle("Notify When Task Completes", isOn: $appState.notifyOnTaskCompleted)
+                    Toggle("Notify When Decision Needed", isOn: $appState.notifyOnDecisionNeeded)
+                    Toggle("Show Banner While App Is Open", isOn: $appState.notifyWhenInForeground)
+
+                    LabeledContent("Notification Permission", value: permissionLabel)
+
+                    if notifications.authorizationStatus == .notDetermined {
+                        Button("Enable Notifications") {
+                            Task { await notifications.requestAuthorizationIfNeeded() }
+                        }
+                    } else if notifications.authorizationStatus == .denied {
+                        Button("Open iOS Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                    }
+
+                    Button("Send Test Notification") {
+                        Task {
+                            await notifications.requestAuthorizationIfNeeded()
+                            notifications.sendTestNotification()
+                        }
+                    }
+                }
+                .listRowBackground(AgyTheme.bgCard)
+
                 Section("AI Engine, Model & Effort") {
                     Picker("Engine", selection: Binding(
                         get: { appState.selectedEngine },
@@ -77,6 +108,19 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+    }
+
+    private var permissionLabel: String {
+        switch notifications.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return "Authorized"
+        case .denied:
+            return "Denied"
+        case .notDetermined:
+            return "Not Asked"
+        @unknown default:
+            return "Unknown"
         }
     }
 }

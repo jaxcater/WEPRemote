@@ -20,6 +20,11 @@ final class WEPClient {
     private let session: URLSession
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private var pingTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var activeProfile: HostProfile?
+    private var shouldMaintainConnection = false
+    private var reconnectAttempt = 0
 
     private(set) var activeBaseURL: String = ""
     private(set) var activeRouteLabel: String = "Disconnected"
@@ -31,25 +36,40 @@ final class WEPClient {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 25
         cfg.timeoutIntervalForResource = 120
+        cfg.waitsForConnectivity = true
         self.session = URLSession(configuration: cfg)
     }
 
     func resolveAndConnect(profile: HostProfile) async throws {
+        activeProfile = profile
+        shouldMaintainConnection = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+
+        let resolved = try await resolveReachableBaseURL(profile: profile)
+        activeBaseURL = resolved.baseURL
+        activeRouteLabel = resolved.routeLabel
+        reconnectAttempt = 0
+        connectWebSocket(baseURL: activeBaseURL, token: profile.token)
+    }
+
+    @discardableResult
+    func resolveReachableBaseURL(profile: HostProfile) async throws -> (baseURL: String, routeLabel: String) {
         if let lan = profile.lanUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !lan.isEmpty {
-            if await probeHealth(baseURL: lan, token: profile.token, timeout: 1.1) {
-                activeBaseURL = lan.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if await probeHealth(baseURL: lan, token: profile.token, timeout: 1.4) {
+                let clean = lan.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                activeBaseURL = clean
                 activeRouteLabel = "LAN"
-                connectWebSocket(baseURL: activeBaseURL, token: profile.token)
-                return
+                return (clean, "LAN")
             }
         }
 
         if let tunnel = profile.tunnelUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !tunnel.isEmpty {
             if await probeHealth(baseURL: tunnel, token: profile.token, timeout: 6.0) {
-                activeBaseURL = tunnel.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                let clean = tunnel.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                activeBaseURL = clean
                 activeRouteLabel = "Tunnel"
-                connectWebSocket(baseURL: activeBaseURL, token: profile.token)
-                return
+                return (clean, "Tunnel")
             }
         }
 
@@ -61,11 +81,20 @@ final class WEPClient {
     }
 
     func disconnectWebSocket() {
+        shouldMaintainConnection = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        teardownSocketOnly()
+        onConnectionStateChange?(false, "Disconnected")
+    }
+
+    private func teardownSocketOnly() {
+        pingTask?.cancel()
+        pingTask = nil
         receiveTask?.cancel()
         receiveTask = nil
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
-        onConnectionStateChange?(false, "Disconnected")
     }
 
     private func probeHealth(baseURL: String, token: String, timeout: TimeInterval) async -> Bool {
@@ -84,7 +113,7 @@ final class WEPClient {
     }
 
     private func connectWebSocket(baseURL: String, token: String) {
-        disconnectWebSocket()
+        teardownSocketOnly()
 
         let wsScheme = baseURL.hasPrefix("https://")
             ? "wss://" + baseURL.dropFirst("https://".count)
@@ -100,10 +129,27 @@ final class WEPClient {
         task.resume()
         onConnectionStateChange?(true, activeRouteLabel)
 
-        receiveTask = Task { [weak self] in
+        pingTask = Task { [weak self, weak task] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                guard !Task.isCancelled, let self, let task, self.webSocketTask === task else { break }
+                let pingFailed = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                    task.sendPing { error in
+                        cont.resume(returning: error != nil)
+                    }
+                }
+                if pingFailed {
+                    self.scheduleReconnect()
+                    break
+                }
+            }
+        }
+
+        receiveTask = Task { [weak self, weak task] in
             guard let self else { return }
             while !Task.isCancelled {
                 do {
+                    guard let task else { break }
                     let message = try await task.receive()
                     switch message {
                     case .string(let text):
@@ -118,8 +164,38 @@ final class WEPClient {
                 } catch {
                     if !Task.isCancelled {
                         self.onConnectionStateChange?(false, "Reconnecting...")
+                        self.scheduleReconnect()
                     }
                     break
+                }
+            }
+        }
+    }
+
+    private func scheduleReconnect() {
+        guard shouldMaintainConnection, let profile = activeProfile else { return }
+        guard reconnectTask == nil else { return }
+
+        reconnectTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.reconnectTask = nil }
+
+            while !Task.isCancelled && self.shouldMaintainConnection {
+                let attempt = min(self.reconnectAttempt, 4)
+                self.reconnectAttempt += 1
+                let delaySeconds = UInt64(min(2 * (1 << attempt), 20))
+                try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
+                if Task.isCancelled || !self.shouldMaintainConnection { break }
+
+                do {
+                    let resolved = try await self.resolveReachableBaseURL(profile: profile)
+                    self.activeBaseURL = resolved.baseURL
+                    self.activeRouteLabel = resolved.routeLabel
+                    self.reconnectAttempt = 0
+                    self.connectWebSocket(baseURL: resolved.baseURL, token: profile.token)
+                    return
+                } catch {
+                    // Continue retrying until connected or disconnected explicitly.
                 }
             }
         }
@@ -264,6 +340,7 @@ final class WEPClient {
         return try await request(path: "/api/terminal/exec", method: "POST", jsonBody: body, token: token)
     }
 
+    @discardableResult
     func startAgent(
         sessionId: String?,
         engine: String,
@@ -275,7 +352,7 @@ final class WEPClient {
         skipPermissions: Bool,
         attachedFiles: [String],
         token: String
-    ) async throws {
+    ) async throws -> AgentStartResponse {
         var body: [String: Any] = [
             "engine": engine,
             "workspacePath": workspacePath,
@@ -287,12 +364,26 @@ final class WEPClient {
             "attachedFiles": attachedFiles
         ]
         if let sessionId { body["sessionId"] = sessionId }
-        let _: [String: AnyCodable] = try await request(path: "/api/agent/start", method: "POST", jsonBody: body, token: token)
+        return try await request(path: "/api/agent/start", method: "POST", jsonBody: body, token: token)
     }
 
-    func cancelAgent(sessionId: String, token: String) async throws {
+    func cancelAgent(sessionId: String, clearQueue: Bool = false, token: String) async throws {
         let es = sessionId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let _: [String: AnyCodable] = try await request(path: "/api/agent/cancel?sessionId=\(es)", method: "POST", token: token)
+        let _: [String: AnyCodable] = try await request(
+            path: "/api/agent/cancel?sessionId=\(es)&clearQueue=\(clearQueue)",
+            method: "POST",
+            token: token
+        )
+    }
+
+    func cancelTurn(sessionId: String, turnId: String, token: String) async throws {
+        let es = sessionId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let et = turnId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let _: [String: AnyCodable] = try await request(
+            path: "/api/agent/cancel-turn?sessionId=\(es)&turnId=\(et)",
+            method: "POST",
+            token: token
+        )
     }
 
     private func request<T: Decodable>(

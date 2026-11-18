@@ -9,10 +9,29 @@ enum MainSurfaceTab: String, CaseIterable {
     case terminal
 }
 
+struct TurnNotificationEvent: Equatable {
+    enum Kind: Equatable {
+        case completed
+        case decision
+    }
+    let kind: Kind
+    let sessionId: String
+    let turnId: String
+    let sessionTitle: String
+    let message: String
+    let status: String
+}
+
 @MainActor
 final class AppState: ObservableObject {
     private let profilesKey = "wep.host.profiles.v1"
     private let activeProfileIdKey = "wep.host.activeProfileId.v1"
+    private let backgroundEnabledKey = "wep.bg.enabled.v1"
+    private let notifyCompletedKey = "wep.notify.completed.v1"
+    private let notifyDecisionKey = "wep.notify.decision.v1"
+    private let notifyForegroundKey = "wep.notify.foreground.v1"
+    private let turnSnapshotsKey = "wep.turn.snapshots.v1"
+    private let pendingOfflinePromptsKey = "wep.pending.offline.prompts.v1"
 
     let client = WEPClient()
 
@@ -75,6 +94,39 @@ final class AppState: ObservableObject {
     @Published var isLoadingExtensions = false
     @Published var extensionStatusMessage: String?
 
+    // Background execution, notifications, & prompt queue
+    @Published var backgroundExecutionEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(backgroundExecutionEnabled, forKey: backgroundEnabledKey)
+            if !backgroundExecutionEnabled {
+                BackgroundManager.shared.cancelAllScheduledTasks()
+            }
+        }
+    }
+    @Published var notifyOnTaskCompleted: Bool = true {
+        didSet { UserDefaults.standard.set(notifyOnTaskCompleted, forKey: notifyCompletedKey) }
+    }
+    @Published var notifyOnDecisionNeeded: Bool = true {
+        didSet { UserDefaults.standard.set(notifyOnDecisionNeeded, forKey: notifyDecisionKey) }
+    }
+    @Published var notifyWhenInForeground: Bool = false {
+        didSet { UserDefaults.standard.set(notifyWhenInForeground, forKey: notifyForegroundKey) }
+    }
+    @Published var pendingOfflinePrompts: [PendingPromptItem] = []
+    @Published var isAppInBackground = false
+
+    private var turnSnapshots: [String: TurnStateSnapshot] = [:]
+    private var notifiedCompletedTurnIds: Set<String> = []
+    private var notifiedDecisionTurnIds: Set<String> = []
+
+    var hasAnyRunningOrQueuedTasks: Bool {
+        sessions.contains(where: { $0.isRunning || $0.turns.contains(where: { $0.isRunning || $0.isQueued }) })
+    }
+
+    var totalQueuedPromptCount: Int {
+        sessions.reduce(0) { $0 + $1.queuedTurnCount } + pendingOfflinePrompts.count
+    }
+
     var modelsForSelectedEngine: [AiModelOption] {
         let filtered = models.filter { $0.resolvedEngine == selectedEngine }
         return filtered.isEmpty ? models : filtered
@@ -102,8 +154,10 @@ final class AppState: ObservableObject {
     }
 
     init() {
+        loadPreferencesAndSnapshots()
         loadProfiles()
         wireWebSocketEvents()
+        wireNotificationsAndBackground()
 
         if let profile = activeProfile {
             Task { await connect(to: profile) }
@@ -112,11 +166,81 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func loadPreferencesAndSnapshots() {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: backgroundEnabledKey) != nil {
+            backgroundExecutionEnabled = defaults.bool(forKey: backgroundEnabledKey)
+        }
+        if defaults.object(forKey: notifyCompletedKey) != nil {
+            notifyOnTaskCompleted = defaults.bool(forKey: notifyCompletedKey)
+        }
+        if defaults.object(forKey: notifyDecisionKey) != nil {
+            notifyOnDecisionNeeded = defaults.bool(forKey: notifyDecisionKey)
+        }
+        if defaults.object(forKey: notifyForegroundKey) != nil {
+            notifyWhenInForeground = defaults.bool(forKey: notifyForegroundKey)
+        }
+        if let data = defaults.data(forKey: turnSnapshotsKey),
+           let decoded = try? JSONDecoder().decode([String: TurnStateSnapshot].self, from: data) {
+            turnSnapshots = decoded
+        }
+        if let data = defaults.data(forKey: pendingOfflinePromptsKey),
+           let decoded = try? JSONDecoder().decode([PendingPromptItem].self, from: data) {
+            pendingOfflinePrompts = decoded
+        }
+    }
+
+    private func saveTurnSnapshots() {
+        if let data = try? JSONEncoder().encode(turnSnapshots) {
+            UserDefaults.standard.set(data, forKey: turnSnapshotsKey)
+        }
+    }
+
+    private func savePendingOfflinePrompts() {
+        if let data = try? JSONEncoder().encode(pendingOfflinePrompts) {
+            UserDefaults.standard.set(data, forKey: pendingOfflinePromptsKey)
+        }
+    }
+
+    private func wireNotificationsAndBackground() {
+        let nm = NotificationManager.shared
+        nm.onOpenSession = { [weak self] sessionId in
+            guard let self else { return }
+            if let session = self.sessions.first(where: { $0.id == sessionId }) {
+                self.selectSession(session)
+            } else {
+                self.activeSessionId = sessionId
+                self.activeTab = .chat
+                Task { await self.refreshHostData() }
+            }
+        }
+        nm.onApproveDecision = { [weak self] sessionId, _ in
+            guard let self else { return }
+            Task {
+                await self.approveDecisionAndContinue(sessionId: sessionId)
+            }
+        }
+        nm.shouldPresentForegroundBanner = { [weak self] sessionId in
+            guard let self else { return true }
+            if self.isAppInBackground { return true }
+            if self.notifyWhenInForeground { return true }
+            return self.activeTab != .chat || self.activeSessionId != sessionId
+        }
+
+        BackgroundManager.shared.updateRefreshHandler { [weak self] in
+            guard let self else { return false }
+            return await self.performBackgroundRefresh()
+        }
+    }
+
     private func wireWebSocketEvents() {
         client.onConnectionStateChange = { [weak self] connected, route in
             Task { @MainActor in
                 self?.isConnected = connected
                 self?.connectionRoute = route
+                if connected {
+                    await self?.flushPendingOfflinePrompts()
+                }
             }
         }
 
@@ -244,7 +368,7 @@ final class AppState: ObservableObject {
             }
 
             let loadedSessions = try await client.listSessions(token: token)
-            self.sessions = loadedSessions
+            applyLoadedSessions(loadedSessions, notifyChanges: true)
             if self.activeSessionId == nil, let first = loadedSessions.first {
                 self.activeSessionId = first.id
                 if !first.workspacePath.isEmpty {
@@ -260,6 +384,148 @@ final class AppState: ObservableObject {
         } catch {
             connectionError = error.localizedDescription
         }
+    }
+
+    func handleScenePhaseChange(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            isAppInBackground = true
+            if backgroundExecutionEnabled {
+                if hasAnyRunningOrQueuedTasks || isConnected {
+                    BackgroundManager.shared.beginImmediateBackgroundGraceTask { [weak self] in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            BackgroundManager.shared.scheduleBackgroundRefresh(hasActiveWork: self.hasAnyRunningOrQueuedTasks)
+                        }
+                    }
+                }
+                BackgroundManager.shared.scheduleBackgroundRefresh(hasActiveWork: hasAnyRunningOrQueuedTasks)
+            }
+        case .active:
+            isAppInBackground = false
+            BackgroundManager.shared.endImmediateBackgroundGraceTask()
+            Task {
+                await NotificationManager.shared.refreshAuthorizationStatus()
+                await syncAfterForeground()
+            }
+        case .inactive:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    func syncAfterForeground() async {
+        guard let profile = activeProfile else { return }
+        if !isConnected {
+            await connect(to: profile)
+        } else {
+            await refreshHostData()
+        }
+        await flushPendingOfflinePrompts()
+    }
+
+    func performBackgroundRefresh() async -> Bool {
+        guard backgroundExecutionEnabled, let profile = activeProfile else {
+            return false
+        }
+
+        do {
+            _ = try await client.resolveReachableBaseURL(profile: profile)
+            let loadedSessions = try await client.listSessions(token: profile.token)
+            applyLoadedSessions(loadedSessions, notifyChanges: true)
+            await flushPendingOfflinePrompts()
+            return hasAnyRunningOrQueuedTasks
+        } catch {
+            return false
+        }
+    }
+
+    private func applyLoadedSessions(_ loadedSessions: [SessionRecord], notifyChanges: Bool) {
+        if notifyChanges && !turnSnapshots.isEmpty {
+            let events = Self.detectTurnNotifications(previous: turnSnapshots, updated: loadedSessions)
+            for ev in events {
+                dispatchNotificationEvent(ev)
+            }
+        }
+        self.sessions = loadedSessions
+        var nextSnapshots: [String: TurnStateSnapshot] = [:]
+        for session in loadedSessions {
+            for turn in session.turns {
+                nextSnapshots[turn.id] = TurnStateSnapshot(
+                    status: turn.status,
+                    needsDecision: turn.requiresUserDecision
+                )
+            }
+        }
+        self.turnSnapshots = nextSnapshots
+        saveTurnSnapshots()
+    }
+
+    nonisolated static func detectTurnNotifications(
+        previous: [String: TurnStateSnapshot],
+        updated: [SessionRecord]
+    ) -> [TurnNotificationEvent] {
+        var events: [TurnNotificationEvent] = []
+        for session in updated {
+            let title = session.title.isEmpty ? "Conversation" : session.title
+            for turn in session.turns {
+                let prev = previous[turn.id]
+                let wasRunningOrNew = (prev == nil) || prev?.status == "running" || prev?.status == "queued"
+
+                if turn.requiresUserDecision && prev?.needsDecision != true {
+                    events.append(TurnNotificationEvent(
+                        kind: .decision,
+                        sessionId: session.id,
+                        turnId: turn.id,
+                        sessionTitle: title,
+                        message: turn.decisionPrompt ?? turn.responseText,
+                        status: turn.status
+                    ))
+                } else if wasRunningOrNew && turn.isTerminal && !turn.requiresUserDecision && turn.status != "cancelled" {
+                    events.append(TurnNotificationEvent(
+                        kind: .completed,
+                        sessionId: session.id,
+                        turnId: turn.id,
+                        sessionTitle: title,
+                        message: turn.responseText,
+                        status: turn.status
+                    ))
+                }
+            }
+        }
+        return events
+    }
+
+    private func dispatchNotificationEvent(_ event: TurnNotificationEvent) {
+        switch event.kind {
+        case .decision:
+            guard notifyOnDecisionNeeded else { return }
+            guard notifiedDecisionTurnIds.insert(event.turnId).inserted else { return }
+            NotificationManager.shared.notifyDecisionNeeded(
+                sessionId: event.sessionId,
+                turnId: event.turnId,
+                sessionTitle: event.sessionTitle,
+                question: event.message
+            )
+        case .completed:
+            guard notifyOnTaskCompleted else { return }
+            guard notifiedCompletedTurnIds.insert(event.turnId).inserted else { return }
+            if shouldDispatchCompletionNotification(for: event.sessionId) {
+                NotificationManager.shared.notifyTaskCompleted(
+                    sessionId: event.sessionId,
+                    turnId: event.turnId,
+                    sessionTitle: event.sessionTitle,
+                    summary: event.message,
+                    status: event.status
+                )
+            }
+        }
+    }
+
+    private func shouldDispatchCompletionNotification(for sessionId: String) -> Bool {
+        if isAppInBackground || notifyWhenInForeground { return true }
+        return activeTab != .chat || activeSessionId != sessionId
     }
 
     func syncWithActiveCursor() async {
@@ -412,14 +678,36 @@ final class AppState: ObservableObject {
         await refreshGitStatus()
     }
 
-    func sendPrompt(_ prompt: String, attachedFiles: [String] = []) async {
+    func sendPrompt(_ prompt: String, attachedFiles: [String] = [], inNewParallelSession: Bool = false) async {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let token = activeProfile?.token else { return }
+        guard !trimmed.isEmpty else { return }
 
         let workspace = activeWorkspace.isEmpty ? (hostInfo?.defaultWorkspace ?? "") : activeWorkspace
 
+        guard let token = activeProfile?.token else { return }
+
+        if !isConnected {
+            let item = PendingPromptItem(
+                id: UUID().uuidString,
+                sessionId: inNewParallelSession ? nil : activeSessionId,
+                engine: selectedEngine.rawValue,
+                workspacePath: workspace,
+                prompt: trimmed,
+                model: selectedModel,
+                effort: selectedEffort,
+                mode: selectedMode.rawValue,
+                skipPermissions: skipPermissions,
+                attachedFiles: attachedFiles,
+                createdAt: Date()
+            )
+            pendingOfflinePrompts.append(item)
+            savePendingOfflinePrompts()
+            return
+        }
+
         do {
-            if activeSessionId == nil {
+            var targetSessionId = inNewParallelSession ? nil : activeSessionId
+            if targetSessionId == nil {
                 let created = try await client.createSession(
                     engine: selectedEngine.rawValue,
                     workspacePath: workspace,
@@ -430,10 +718,11 @@ final class AppState: ObservableObject {
                 )
                 sessions.insert(created, at: 0)
                 activeSessionId = created.id
+                targetSessionId = created.id
             }
 
-            try await client.startAgent(
-                sessionId: activeSessionId,
+            _ = try await client.startAgent(
+                sessionId: targetSessionId,
                 engine: selectedEngine.rawValue,
                 workspacePath: workspace,
                 prompt: trimmed,
@@ -449,9 +738,76 @@ final class AppState: ObservableObject {
         }
     }
 
-    func cancelActiveTurn() async {
+    func flushPendingOfflinePrompts() async {
+        guard isConnected, !pendingOfflinePrompts.isEmpty, let token = activeProfile?.token else { return }
+        let items = pendingOfflinePrompts
+        pendingOfflinePrompts.removeAll()
+        savePendingOfflinePrompts()
+
+        for (index, item) in items.enumerated() {
+            do {
+                var targetSessionId = item.sessionId
+                if targetSessionId == nil {
+                    let created = try await client.createSession(
+                        engine: item.engine,
+                        workspacePath: item.workspacePath,
+                        model: item.model,
+                        effort: item.effort,
+                        mode: item.mode,
+                        token: token
+                    )
+                    sessions.insert(created, at: 0)
+                    if activeSessionId == nil {
+                        activeSessionId = created.id
+                    }
+                    targetSessionId = created.id
+                }
+
+                _ = try await client.startAgent(
+                    sessionId: targetSessionId,
+                    engine: item.engine,
+                    workspacePath: item.workspacePath,
+                    prompt: item.prompt,
+                    model: item.model,
+                    effort: item.effort,
+                    mode: item.mode,
+                    skipPermissions: item.skipPermissions,
+                    attachedFiles: item.attachedFiles,
+                    token: token
+                )
+            } catch {
+                let remaining = Array(items[index...])
+                pendingOfflinePrompts.insert(contentsOf: remaining, at: 0)
+                savePendingOfflinePrompts()
+                connectionError = error.localizedDescription
+                break
+            }
+        }
+    }
+
+    func removePendingOfflinePrompt(id: String) {
+        pendingOfflinePrompts.removeAll(where: { $0.id == id })
+        savePendingOfflinePrompts()
+    }
+
+    func cancelActiveTurn(clearQueue: Bool = false) async {
         guard let sid = activeSessionId, let token = activeProfile?.token else { return }
-        try? await client.cancelAgent(sessionId: sid, token: token)
+        try? await client.cancelAgent(sessionId: sid, clearQueue: clearQueue, token: token)
+    }
+
+    func cancelTurn(sessionId: String, turnId: String) async {
+        guard let token = activeProfile?.token else { return }
+        try? await client.cancelTurn(sessionId: sessionId, turnId: turnId, token: token)
+    }
+
+    func approveDecisionAndContinue(sessionId: String, customReply: String = "Approved. Please proceed.") async {
+        if let session = sessions.first(where: { $0.id == sessionId }) {
+            selectSession(session)
+        } else {
+            activeSessionId = sessionId
+            activeTab = .chat
+        }
+        await sendPrompt(customReply)
     }
 
     func openFileInEditor(path: String) async {
@@ -521,7 +877,9 @@ final class AppState: ObservableObject {
     private func handleWsEvent(type: String, payload: [String: Any]) {
         guard let sessionId = payload["sessionId"] as? String else { return }
 
-        if type == "agent.turn_started" {
+        if type == "agent.turn_queued" || type == "agent.turn_started" {
+            let isQueued = (type == "agent.turn_queued")
+            let targetStatus = isQueued ? "queued" : "running"
             let turnId = payload["turnId"] as? String ?? UUID().uuidString
             let prompt = payload["prompt"] as? String ?? ""
             let engine = payload["engine"] as? String ?? selectedEngine.rawValue
@@ -529,23 +887,30 @@ final class AppState: ObservableObject {
             let model = payload["model"] as? String ?? selectedModel
             let effort = payload["effort"] as? String ?? selectedEffort
             let mode = payload["mode"] as? String ?? selectedMode.rawValue
+            let files = payload["attachedFiles"] as? [String] ?? []
 
             if let idx = sessions.firstIndex(where: { $0.id == sessionId }) {
                 sessions[idx].isRunning = true
-                sessions[idx].engine = engine
-                sessions[idx].model = model
-                sessions[idx].effort = effort
-                if !sessions[idx].turns.contains(where: { $0.id == turnId }) {
+                if !isQueued {
+                    sessions[idx].engine = engine
+                    sessions[idx].model = model
+                    sessions[idx].effort = effort
+                }
+                if let existingTurnIdx = sessions[idx].turns.firstIndex(where: { $0.id == turnId }) {
+                    sessions[idx].turns[existingTurnIdx].status = targetStatus
+                } else {
                     let turn = SessionTurn(
                         id: turnId,
                         engine: engine,
                         model: model,
                         effort: effort,
                         prompt: prompt,
-                        attachedFiles: [],
+                        attachedFiles: files,
                         responseText: "",
                         thinkingText: "",
-                        status: "running",
+                        status: targetStatus,
+                        needsDecision: false,
+                        decisionPrompt: nil,
                         durationSeconds: 0,
                         usage: nil,
                         startedAt: nil,
@@ -577,10 +942,12 @@ final class AppState: ObservableObject {
                             model: model,
                             effort: effort,
                             prompt: prompt,
-                            attachedFiles: [],
+                            attachedFiles: files,
                             responseText: "",
                             thinkingText: "",
-                            status: "running",
+                            status: targetStatus,
+                            needsDecision: false,
+                            decisionPrompt: nil,
                             durationSeconds: 0,
                             usage: nil,
                             startedAt: nil,
@@ -590,6 +957,8 @@ final class AppState: ObservableObject {
                 )
                 sessions.insert(newSession, at: 0)
             }
+            turnSnapshots[turnId] = TurnStateSnapshot(status: targetStatus, needsDecision: false)
+            saveTurnSnapshots()
             if activeSessionId == nil { activeSessionId = sessionId }
             return
         }
@@ -622,9 +991,30 @@ final class AppState: ObservableObject {
                 }
             }
 
+        case "agent.decision_required":
+            let decisionPrompt = payload["decisionPrompt"] as? String ?? "User decision required to continue."
+            sessions[sIdx].turns[tIdx].needsDecision = true
+            sessions[sIdx].turns[tIdx].decisionPrompt = decisionPrompt
+            turnSnapshots[turnId] = TurnStateSnapshot(status: sessions[sIdx].turns[tIdx].status, needsDecision: true)
+            saveTurnSnapshots()
+            dispatchNotificationEvent(TurnNotificationEvent(
+                kind: .decision,
+                sessionId: sessionId,
+                turnId: turnId,
+                sessionTitle: sessions[sIdx].title,
+                message: decisionPrompt,
+                status: sessions[sIdx].turns[tIdx].status
+            ))
+
         case "agent.turn_finished":
-            sessions[sIdx].isRunning = false
-            sessions[sIdx].turns[tIdx].status = payload["status"] as? String ?? "success"
+            let status = payload["status"] as? String ?? "success"
+            let needsDecision = payload["needsDecision"] as? Bool ?? sessions[sIdx].turns[tIdx].needsDecision ?? false
+            let decisionPrompt = payload["decisionPrompt"] as? String ?? sessions[sIdx].turns[tIdx].decisionPrompt
+            let hasQueuedNext = payload["hasQueuedNext"] as? Bool ?? false
+
+            sessions[sIdx].turns[tIdx].status = status
+            sessions[sIdx].turns[tIdx].needsDecision = needsDecision
+            sessions[sIdx].turns[tIdx].decisionPrompt = decisionPrompt
             if let dur = payload["durationSeconds"] as? Double {
                 sessions[sIdx].turns[tIdx].durationSeconds = dur
             }
@@ -644,6 +1034,35 @@ final class AppState: ObservableObject {
                let usage = try? JSONDecoder().decode(UsageMetrics.self, from: data) {
                 sessions[sIdx].turns[tIdx].usage = usage
             }
+
+            let stillHasActive = hasQueuedNext || sessions[sIdx].turns.contains(where: { $0.isRunning || $0.isQueued })
+            sessions[sIdx].isRunning = stillHasActive
+
+            turnSnapshots[turnId] = TurnStateSnapshot(status: status, needsDecision: needsDecision)
+            saveTurnSnapshots()
+
+            let sessionTitle = sessions[sIdx].title
+            let summaryText = sessions[sIdx].turns[tIdx].responseText
+            if needsDecision {
+                dispatchNotificationEvent(TurnNotificationEvent(
+                    kind: .decision,
+                    sessionId: sessionId,
+                    turnId: turnId,
+                    sessionTitle: sessionTitle,
+                    message: decisionPrompt ?? summaryText,
+                    status: status
+                ))
+            } else if status != "cancelled" {
+                dispatchNotificationEvent(TurnNotificationEvent(
+                    kind: .completed,
+                    sessionId: sessionId,
+                    turnId: turnId,
+                    sessionTitle: sessionTitle,
+                    message: summaryText,
+                    status: status
+                ))
+            }
+
             Task { await refreshGitStatus() }
 
         default:

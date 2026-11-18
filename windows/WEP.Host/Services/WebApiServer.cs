@@ -449,7 +449,7 @@ public sealed class WebApiServer : IAsyncDisposable
                 return Results.BadRequest(new { error = "Prompt is required." });
             }
 
-            await _agy.StartTurnAsync(
+            var res = await _agy.StartTurnAsync(
                 req.SessionId,
                 req.Engine,
                 req.WorkspacePath ?? _config.Current.DefaultWorkspace,
@@ -459,12 +459,24 @@ public sealed class WebApiServer : IAsyncDisposable
                 req.Mode,
                 req.SkipPermissions,
                 req.AttachedFiles);
-            return Results.Ok(new { accepted = true });
+            return Results.Ok(new
+            {
+                accepted = true,
+                sessionId = res.SessionId,
+                turnId = res.TurnId,
+                queued = res.Queued
+            });
         });
 
-        app.MapPost("/api/agent/cancel", (string sessionId) =>
+        app.MapPost("/api/agent/cancel", (string sessionId, bool? clearQueue) =>
         {
-            var cancelled = _agy.CancelSession(sessionId);
+            var cancelled = _agy.CancelSession(sessionId, clearQueue ?? false);
+            return Results.Ok(new { cancelled });
+        });
+
+        app.MapPost("/api/agent/cancel-turn", (string sessionId, string turnId) =>
+        {
+            var cancelled = _agy.CancelTurn(sessionId, turnId);
             return Results.Ok(new { cancelled });
         });
 
@@ -560,7 +572,14 @@ public sealed class WebApiServer : IAsyncDisposable
                 case "agent.cancel":
                     if (!string.IsNullOrWhiteSpace(msg.SessionId))
                     {
-                        _agy.CancelSession(msg.SessionId);
+                        _agy.CancelSession(msg.SessionId, msg.ClearQueue ?? false);
+                    }
+                    break;
+
+                case "agent.cancel_turn":
+                    if (!string.IsNullOrWhiteSpace(msg.SessionId) && !string.IsNullOrWhiteSpace(msg.TurnId))
+                    {
+                        _agy.CancelTurn(msg.SessionId, msg.TurnId);
                     }
                     break;
 

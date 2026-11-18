@@ -7,6 +7,7 @@ struct ChatCanvasView: View {
     @State private var attachedFiles: [String] = []
     @State private var showFileMentionSheet = false
     @State private var showSlashMenu = false
+    @State private var sendInParallelSession = false
     @FocusState private var isPromptFocused: Bool
 
     var body: some View {
@@ -38,8 +39,19 @@ struct ChatCanvasView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
                             ForEach(session.turns) { turn in
-                                TurnView(turn: turn)
-                                    .id(turn.id)
+                                TurnView(
+                                    turn: turn,
+                                    onCancelQueued: turn.isQueued ? {
+                                        Task { await appState.cancelTurn(sessionId: session.id, turnId: turn.id) }
+                                    } : nil,
+                                    onApproveDecision: turn.requiresUserDecision ? {
+                                        Task { await appState.approveDecisionAndContinue(sessionId: session.id) }
+                                    } : nil,
+                                    onReplyDecision: turn.requiresUserDecision ? {
+                                        isPromptFocused = true
+                                    } : nil
+                                )
+                                .id(turn.id)
                             }
                         }
                         .padding(14)
@@ -49,6 +61,13 @@ struct ChatCanvasView: View {
                     .onTapGesture {
                         isPromptFocused = false
                         hideKeyboard()
+                    }
+                    .onChange(of: session.turns.count) { _, _ in
+                        if let lastId = session.turns.last?.id {
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                proxy.scrollTo(lastId, anchor: .bottom)
+                            }
+                        }
                     }
                     .onChange(of: session.turns.last?.responseText) { _, _ in
                         if let lastId = session.turns.last?.id {
@@ -206,6 +225,76 @@ struct ChatCanvasView: View {
 
     private var composerPanel: some View {
         VStack(spacing: 7) {
+            if !appState.pendingOfflinePrompts.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(appState.pendingOfflinePrompts) { pending in
+                            HStack(spacing: 5) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.system(size: 10))
+                                Text("Offline Queue: \(pending.prompt)")
+                                    .font(.system(size: 11))
+                                    .lineLimit(1)
+                                Button {
+                                    appState.removePendingOfflinePrompt(id: pending.id)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 11))
+                                }
+                            }
+                            .foregroundColor(AgyTheme.warning)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(AgyTheme.warning.opacity(0.14))
+                            .cornerRadius(6)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                }
+            }
+
+            if appState.currentTurnIsRunning {
+                HStack(spacing: 8) {
+                    HStack(spacing: 5) {
+                        ProgressView()
+                            .scaleEffect(0.65)
+                            .tint(AgyTheme.accentCyan)
+                        Text(sendInParallelSession ? "Parallel mode: sends in new chat" : "Running: new prompts queue next")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(AgyTheme.textSecondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    if let qCount = appState.activeSession?.queuedTurnCount, qCount > 0 {
+                        Text("\(qCount) queued")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(AgyTheme.accentCyan)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(AgyTheme.accentCyan.opacity(0.14))
+                            .cornerRadius(5)
+                    }
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            sendInParallelSession.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: sendInParallelSession ? "arrow.branch" : "text.append")
+                                .font(.system(size: 10))
+                            Text(sendInParallelSession ? "Parallel" : "Queue")
+                                .font(.system(size: 10.5, weight: .semibold))
+                        }
+                        .foregroundColor(sendInParallelSession ? AgyTheme.accentCodex : AgyTheme.accentIndigo)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background((sendInParallelSession ? AgyTheme.accentCodex : AgyTheme.accentIndigo).opacity(0.16))
+                        .cornerRadius(6)
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+
             if !attachedFiles.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
@@ -427,30 +516,32 @@ struct ChatCanvasView: View {
                                 .background(AgyTheme.danger)
                                 .clipShape(Circle())
                         }
-                    } else {
-                        Button {
-                            let toSend = promptText
-                            let files = attachedFiles
-                            promptText = ""
-                            attachedFiles = []
-                            showSlashMenu = false
-                            isPromptFocused = false
-                            hideKeyboard()
-                            Task { await appState.sendPrompt(toSend, attachedFiles: files) }
-                        } label: {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(.white)
-                                .frame(width: 32, height: 32)
-                                .background(
-                                    promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                        ? AnyShapeStyle(AgyTheme.bgElevated)
-                                        : (appState.selectedEngine == .codex ? AnyShapeStyle(AgyTheme.codexGradient) : AnyShapeStyle(AgyTheme.brandGradient))
-                                )
-                                .clipShape(Circle())
-                        }
-                        .disabled(promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !appState.isConnected)
                     }
+
+                    let canSend = !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    Button {
+                        let toSend = promptText
+                        let files = attachedFiles
+                        let useParallel = appState.currentTurnIsRunning && sendInParallelSession
+                        promptText = ""
+                        attachedFiles = []
+                        showSlashMenu = false
+                        isPromptFocused = false
+                        hideKeyboard()
+                        Task { await appState.sendPrompt(toSend, attachedFiles: files, inNewParallelSession: useParallel) }
+                    } label: {
+                        Image(systemName: appState.currentTurnIsRunning ? (sendInParallelSession ? "arrow.branch" : "text.badge.plus") : "arrow.up")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 32, height: 32)
+                            .background(
+                                !canSend
+                                    ? AnyShapeStyle(AgyTheme.bgElevated)
+                                    : (appState.selectedEngine == .codex ? AnyShapeStyle(AgyTheme.codexGradient) : AnyShapeStyle(AgyTheme.brandGradient))
+                            )
+                            .clipShape(Circle())
+                    }
+                    .disabled(!canSend)
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
@@ -468,6 +559,9 @@ struct ChatCanvasView: View {
 
 struct TurnView: View {
     let turn: SessionTurn
+    var onCancelQueued: (() -> Void)? = nil
+    var onApproveDecision: (() -> Void)? = nil
+    var onReplyDecision: (() -> Void)? = nil
     @State private var showThinking = false
 
     private var engine: AgentEngine {
@@ -565,13 +659,89 @@ struct TurnView: View {
                         .foregroundColor(AgyTheme.textSecondary)
                 }
                 .padding(10)
+            } else if turn.status == "queued" {
+                HStack(spacing: 8) {
+                    Image(systemName: "clock.badge.checkmark")
+                        .font(.system(size: 13))
+                        .foregroundColor(AgyTheme.accentCyan)
+                    Text("Queued — will start automatically when current prompt finishes")
+                        .font(.system(size: 12))
+                        .foregroundColor(AgyTheme.textSecondary)
+                    Spacer()
+                    if let onCancelQueued {
+                        Button {
+                            onCancelQueued()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 15))
+                                .foregroundColor(AgyTheme.textMuted)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(AgyTheme.accentCyan.opacity(0.10))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(AgyTheme.accentCyan.opacity(0.3), lineWidth: 1))
             }
 
-            if turn.status != "running" {
+            if turn.requiresUserDecision {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "hand.raised.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(AgyTheme.warning)
+                        Text("Decision Needed to Continue")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(AgyTheme.warning)
+                    }
+
+                    if let q = turn.decisionPrompt, !q.isEmpty {
+                        Text(q)
+                            .font(.system(size: 12.5))
+                            .foregroundColor(AgyTheme.textPrimary)
+                    }
+
+                    HStack(spacing: 8) {
+                        if let onApproveDecision {
+                            Button {
+                                onApproveDecision()
+                            } label: {
+                                Label("Approve & Continue", systemImage: "checkmark.circle.fill")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(AgyTheme.accentIndigo)
+                                    .cornerRadius(8)
+                            }
+                        }
+                        if let onReplyDecision {
+                            Button {
+                                onReplyDecision()
+                            } label: {
+                                Label("Reply", systemImage: "bubble.left.fill")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(AgyTheme.textPrimary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(AgyTheme.bgElevated)
+                                    .cornerRadius(8)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(AgyTheme.borderSubtle, lineWidth: 1))
+                            }
+                        }
+                    }
+                }
+                .padding(11)
+                .background(AgyTheme.warning.opacity(0.12))
+                .cornerRadius(11)
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(AgyTheme.warning.opacity(0.45), lineWidth: 1))
+            }
+
+            if turn.isTerminal {
                 HStack(spacing: 10) {
                     Label(turn.status.uppercased(), systemImage: turn.status == "success" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundColor(turn.status == "success" ? AgyTheme.success : AgyTheme.danger)
+                        .foregroundColor(turn.status == "success" ? AgyTheme.success : (turn.status == "cancelled" ? AgyTheme.textMuted : AgyTheme.danger))
                     if turn.durationSeconds > 0 {
                         Text(String(format: "%.1fs", turn.durationSeconds))
                             .font(.system(size: 10.5, design: .monospaced))

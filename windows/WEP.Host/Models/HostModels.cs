@@ -61,7 +61,9 @@ public sealed class SessionTurn
     public List<string> AttachedFiles { get; set; } = new();
     public string ResponseText { get; set; } = string.Empty;
     public string ThinkingText { get; set; } = string.Empty;
-    public string Status { get; set; } = "running"; // running | success | error | cancelled
+    public string Status { get; set; } = "running"; // running | queued | success | error | cancelled | interrupted
+    public bool NeedsDecision { get; set; }
+    public string? DecisionPrompt { get; set; }
     public double DurationSeconds { get; set; }
     public UsageMetrics? Usage { get; set; }
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -247,6 +249,7 @@ public sealed class WsIncomingMessage
     public string? Mode { get; set; }
     public bool? SkipPermissions { get; set; }
     public List<string>? AttachedFiles { get; set; }
+    public bool? ClearQueue { get; set; }
     public string? Command { get; set; }
     public string? Cwd { get; set; }
 }

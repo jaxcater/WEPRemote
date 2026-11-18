@@ -201,6 +201,22 @@ struct SidebarView: View {
                                                 .lineLimit(1)
                                         }
                                         Spacer()
+                                        if session.isRunning {
+                                            HStack(spacing: 4) {
+                                                ProgressView()
+                                                    .scaleEffect(0.6)
+                                                    .tint(AgyTheme.accentCyan)
+                                                if session.queuedTurnCount > 0 {
+                                                    Text("+\(session.queuedTurnCount)")
+                                                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                                        .foregroundColor(AgyTheme.accentCyan)
+                                                }
+                                            }
+                                        } else if session.hasDecisionPending {
+                                            Image(systemName: "hand.raised.fill")
+                                                .font(.system(size: 11))
+                                                .foregroundColor(AgyTheme.warning)
+                                        }
                                     }
                                     .padding(8)
                                     .background(selected ? AgyTheme.bgElevated : Color.clear)

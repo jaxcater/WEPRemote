@@ -31,6 +31,16 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>WEP uses the camera to scan the QR pairing code shown on your Windows WEP Host app.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.wep.remote.ios.refresh</string>
+		<string>com.wep.remote.ios.processing</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

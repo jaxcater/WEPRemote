@@ -148,6 +148,14 @@ struct SessionRecord: Codable, Identifiable {
     var updatedAt: String?
     var isRunning: Bool
     var turns: [SessionTurn]
+
+    var queuedTurnCount: Int {
+        turns.filter { $0.isQueued }.count
+    }
+
+    var hasDecisionPending: Bool {
+        turns.last?.requiresUserDecision == true
+    }
 }
 
 struct SessionTurn: Codable, Identifiable {
@@ -160,10 +168,45 @@ struct SessionTurn: Codable, Identifiable {
     var responseText: String
     var thinkingText: String
     var status: String
+    var needsDecision: Bool?
+    var decisionPrompt: String?
     var durationSeconds: Double
     var usage: UsageMetrics?
     var startedAt: String?
     var toolSteps: [AgentToolStep]
+
+    var isRunning: Bool { status == "running" }
+    var isQueued: Bool { status == "queued" }
+    var isTerminal: Bool { status != "running" && status != "queued" }
+    var requiresUserDecision: Bool {
+        needsDecision == true || status == "needs_decision"
+    }
+}
+
+struct AgentStartResponse: Codable {
+    let accepted: Bool?
+    let sessionId: String?
+    let turnId: String?
+    let queued: Bool?
+}
+
+struct TurnStateSnapshot: Codable, Equatable {
+    let status: String
+    let needsDecision: Bool
+}
+
+struct PendingPromptItem: Codable, Identifiable {
+    let id: String
+    let sessionId: String?
+    let engine: String
+    let workspacePath: String
+    let prompt: String
+    let model: String
+    let effort: String
+    let mode: String
+    let skipPermissions: Bool
+    let attachedFiles: [String]
+    let createdAt: Date
 }
 
 struct AgentToolStep: Codable, Identifiable {
