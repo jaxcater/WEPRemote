@@ -1,0 +1,23 @@
+# Windows / .NET
+windows/**/bin/
+windows/**/obj/
+dist/
+*.user
+*.suo
+.vs/
+
+# iOS / Xcode
+ios/**/build/
+ios/**/DerivedData/
+ios/**/*.xcodeproj/
+*.ipa
+*.xcarchive
+*.dSYM.zip
+*.dSYM
+
+# Local secrets / runtime
+*.pfx
+*.p12
+*.mobileprovision
+.DS_Store
+Thumbs.db

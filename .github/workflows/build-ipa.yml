@@ -1,0 +1,96 @@
+name: Build WEP iOS IPA & Windows Host
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios-ipa:
+    name: Build Unsigned WEP.ipa (macOS Xcode)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate WEP.xcodeproj
+        working-directory: ios/WEP
+        run: xcodegen generate
+
+      - name: Build WEP.app (Release, iphoneos, unsigned)
+        working-directory: ios/WEP
+        run: |
+          xcodebuild \
+            -project WEP.xcodeproj \
+            -scheme WEP \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: Package WEP.ipa
+        working-directory: ios/WEP
+        run: |
+          mkdir -p ipa_stage/Payload
+          cp -R build/Build/Products/Release-iphoneos/WEP.app ipa_stage/Payload/
+          cd ipa_stage
+          zip -qry ../WEP.ipa Payload
+          cd ..
+          ls -lh WEP.ipa
+          unzip -l WEP.ipa | head -n 25
+
+      - name: Upload WEP.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WEP-ipa
+          path: ios/WEP/WEP.ipa
+          retention-days: 90
+
+      - name: Publish WEP.ipa to GitHub Release (latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: WEP iOS Latest Build
+          body: |
+            Automated unsigned/ad-hoc **WEP.ipa** build for iOS 17+.
+            Install on iPhone via **Sideloadly**, **AltStore**, **SideStore**, or **TrollStore**.
+          files: ios/WEP/WEP.ipa
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-windows-host:
+    name: Verify WEP.Host (Windows .NET 9)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Build & Publish WEP.Host
+        run: dotnet publish windows/WEP.Host/WEP.Host.csproj -c Release -r win-x64 --self-contained false -o dist/WEP.Host
+
+      - name: Upload WEP.Host Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WEP-Host-win-x64
+          path: dist/WEP.Host
+          retention-days: 30
