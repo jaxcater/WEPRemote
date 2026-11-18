@@ -7,10 +7,28 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Antigravity Agent Defaults") {
-                    Picker("Model", selection: $appState.selectedModel) {
-                        ForEach(appState.models) { model in
+                Section("AI Engine, Model & Effort") {
+                    Picker("Engine", selection: Binding(
+                        get: { appState.selectedEngine },
+                        set: { appState.selectEngine($0) }
+                    )) {
+                        ForEach(AgentEngine.allCases) { eng in
+                            Text(eng.displayName).tag(eng)
+                        }
+                    }
+
+                    Picker("Model", selection: Binding(
+                        get: { appState.selectedModel },
+                        set: { appState.selectModel($0) }
+                    )) {
+                        ForEach(appState.modelsForSelectedEngine) { model in
                             Text(model.displayName).tag(model.id)
+                        }
+                    }
+
+                    Picker("Reasoning Effort", selection: $appState.selectedEffort) {
+                        ForEach(appState.supportedEffortsForCurrentModel, id: \.self) { eff in
+                            Text(ReasoningEffort(rawValue: eff)?.label ?? eff.capitalized).tag(eff)
                         }
                     }
 
@@ -28,6 +46,8 @@ struct SettingsView: View {
                     LabeledContent("Host Name", value: appState.hostInfo?.deviceName ?? appState.activeProfile?.name ?? "None")
                     LabeledContent("Route", value: appState.connectionRoute)
                     LabeledContent("Antigravity CLI", value: (appState.hostInfo?.agyInstalled ?? false) ? "Ready" : "Unavailable")
+                    LabeledContent("Codex CLI", value: (appState.hostInfo?.codexInstalled ?? false) ? "Ready" : "Unavailable")
+                    LabeledContent("Cursor Live", value: (appState.cursorLive?.isCursorRunning ?? false) ? "Running (\(appState.cursorLive?.processCount ?? 0))" : "Idle")
                     if let tunnel = appState.hostInfo?.tunnelUrl ?? appState.activeProfile?.tunnelUrl, !tunnel.isEmpty {
                         LabeledContent("Tunnel", value: tunnel)
                     }

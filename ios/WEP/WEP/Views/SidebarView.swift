@@ -5,22 +5,22 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Antigravity Brand Header
+            // Studio Brand Header
             HStack(spacing: 10) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 9)
                         .fill(AgyTheme.brandGradient)
-                        .frame(width: 30, height: 30)
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 14, weight: .bold))
+                        .frame(width: 32, height: 32)
+                    Text("W")
+                        .font(.system(size: 16, weight: .heavy))
                         .foregroundColor(.white)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("WEP")
+                    Text("WEP Studio")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundColor(AgyTheme.textPrimary)
-                    Text(appState.activeProfile?.name ?? "Antigravity iOS")
-                        .font(.system(size: 11))
+                    Text(appState.activeProfile?.name ?? "Antigravity • Codex • Cursor")
+                        .font(.system(size: 10.5))
                         .foregroundColor(AgyTheme.textSecondary)
                 }
                 Spacer()
@@ -43,13 +43,19 @@ struct SidebarView: View {
                     Text("New Conversation")
                         .fontWeight(.semibold)
                     Spacer()
+                    Text(appState.selectedEngine.shortBadge)
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.white.opacity(0.2))
+                        .cornerRadius(5)
                 }
                 .font(.system(size: 13.5))
                 .foregroundColor(.white)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(AgyTheme.accentIndigo)
-                .cornerRadius(9)
+                .background(appState.selectedEngine == .codex ? AnyShapeStyle(AgyTheme.codexGradient) : AnyShapeStyle(AgyTheme.brandGradient))
+                .cornerRadius(10)
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 12)
@@ -58,6 +64,59 @@ struct SidebarView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    // Live Cursor Window Section
+                    if let cursor = appState.cursorLive {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                HStack(spacing: 5) {
+                                    Circle()
+                                        .fill(cursor.isCursorRunning ? AgyTheme.accentCodex : AgyTheme.textMuted)
+                                        .frame(width: 7, height: 7)
+                                    Text("LIVE CURSOR SESSION")
+                                        .font(.system(size: 10.5, weight: .bold))
+                                        .foregroundColor(cursor.isCursorRunning ? AgyTheme.accentCodex : AgyTheme.textMuted)
+                                }
+                                Spacer()
+                                Button("Sync") {
+                                    Task {
+                                        await appState.syncWithActiveCursor()
+                                        appState.showSidebar = false
+                                    }
+                                }
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(AgyTheme.accentCyan)
+                            }
+
+                            if let activeWs = cursor.activeWorkspace, !activeWs.isEmpty {
+                                Button {
+                                    Task {
+                                        await appState.openFolderAsWorkspace(activeWs)
+                                        appState.showSidebar = false
+                                    }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "cursorarrow.click.2")
+                                            .foregroundColor(AgyTheme.accentCodex)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(folderBaseName(activeWs))
+                                                .font(.system(size: 13, weight: .semibold))
+                                                .foregroundColor(AgyTheme.textPrimary)
+                                            Text(cursor.activeWindowTitles.first ?? activeWs)
+                                                .font(.system(size: 10, design: .monospaced))
+                                                .foregroundColor(AgyTheme.textSecondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(9)
+                                    .background(AgyTheme.accentCodex.opacity(0.11))
+                                    .cornerRadius(8)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(AgyTheme.accentCodex.opacity(0.35), lineWidth: 1))
+                                }
+                            }
+                        }
+                    }
+
                     // Projects / Open Folder
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -104,7 +163,7 @@ struct SidebarView: View {
                         }
                     }
 
-                    // Conversations
+                    // WEP Conversations
                     VStack(alignment: .leading, spacing: 8) {
                         Text("CONVERSATIONS")
                             .font(.system(size: 10.5, weight: .bold))
@@ -114,23 +173,29 @@ struct SidebarView: View {
                             Text("No remote conversations yet")
                                 .font(.system(size: 12))
                                 .foregroundColor(AgyTheme.textMuted)
-                                .padding(.vertical, 6)
+                                .padding(.vertical, 4)
                         } else {
                             ForEach(appState.sessions) { session in
                                 let selected = session.id == appState.activeSessionId
+                                let eng = AgentEngine(rawValue: session.engine ?? "antigravity") ?? .antigravity
                                 Button {
                                     appState.selectSession(session)
                                 } label: {
                                     HStack(spacing: 8) {
-                                        Circle()
-                                            .fill(session.isRunning ? AgyTheme.warning : (selected ? AgyTheme.accentCyan : AgyTheme.textMuted.opacity(0.4)))
-                                            .frame(width: 7, height: 7)
+                                        Text(eng.shortBadge)
+                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                            .foregroundColor(eng == .codex ? AgyTheme.accentCodex : AgyTheme.accentCyan)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 2)
+                                            .background((eng == .codex ? AgyTheme.accentCodex : AgyTheme.accentIndigo).opacity(0.16))
+                                            .cornerRadius(4)
+
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(session.title.isEmpty ? "Conversation" : session.title)
                                                 .font(.system(size: 13, weight: selected ? .semibold : .regular))
                                                 .foregroundColor(AgyTheme.textPrimary)
                                                 .lineLimit(1)
-                                            Text("\(folderBaseName(session.workspacePath)) • \(session.turns.count) turns")
+                                            Text("\(folderBaseName(session.workspacePath)) • \(session.effort ?? "high")")
                                                 .font(.system(size: 10.5))
                                                 .foregroundColor(AgyTheme.textMuted)
                                                 .lineLimit(1)
@@ -144,13 +209,45 @@ struct SidebarView: View {
                             }
                         }
                     }
+
+                    // Cursor Codex Threads (~/.codex)
+                    if !appState.codexThreads.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("CURSOR CODEX THREADS")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .foregroundColor(AgyTheme.textMuted)
+
+                            ForEach(appState.codexThreads.prefix(8)) { thread in
+                                Button {
+                                    Task {
+                                        await appState.resumeCodexThread(thread)
+                                        appState.showSidebar = false
+                                    }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "arrow.triangle.2.circlepath")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(AgyTheme.accentCodex)
+                                        Text(thread.title)
+                                            .font(.system(size: 12.5))
+                                            .foregroundColor(AgyTheme.textSecondary)
+                                            .lineLimit(1)
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                                    .background(AgyTheme.bgCard)
+                                    .cornerRadius(7)
+                                }
+                            }
+                        }
+                    }
                 }
                 .padding(14)
             }
 
             Divider().background(AgyTheme.borderSubtle)
 
-            // Footer Actions (Pair PC & Settings)
             VStack(spacing: 6) {
                 Button {
                     appState.showSidebar = false
@@ -176,7 +273,7 @@ struct SidebarView: View {
                     HStack(spacing: 10) {
                         Image(systemName: "gearshape")
                             .foregroundColor(AgyTheme.textSecondary)
-                        Text("Antigravity Settings")
+                        Text("Engines & Settings")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(AgyTheme.textPrimary)
                         Spacer()

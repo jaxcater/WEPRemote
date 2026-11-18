@@ -1,12 +1,12 @@
 import SwiftUI
 
 enum AgyTheme {
-    static let bgCanvas = Color(hex: 0x0B0D12)
-    static let bgSidebar = Color(hex: 0x12151E)
-    static let bgCard = Color(hex: 0x171B26)
-    static let bgElevated = Color(hex: 0x1F2433)
-    static let bgInput = Color(hex: 0x0E1118)
-    static let borderSubtle = Color(hex: 0x262B3D)
+    static let bgCanvas = Color(hex: 0x090B10)
+    static let bgSidebar = Color(hex: 0x10141E)
+    static let bgCard = Color(hex: 0x151A28)
+    static let bgElevated = Color(hex: 0x1D2437)
+    static let bgInput = Color(hex: 0x0C0F17)
+    static let borderSubtle = Color(hex: 0x252D42)
 
     static let textPrimary = Color(hex: 0xF3F4F6)
     static let textSecondary = Color(hex: 0x9CA3AF)
@@ -14,12 +14,20 @@ enum AgyTheme {
 
     static let accentIndigo = Color(hex: 0x6366F1)
     static let accentCyan = Color(hex: 0x38BDF8)
+    static let accentCodex = Color(hex: 0x10B981)
+    static let accentViolet = Color(hex: 0xA855F7)
     static let success = Color(hex: 0x22C55E)
     static let warning = Color(hex: 0xF59E0B)
     static let danger = Color(hex: 0xEF4444)
 
     static let brandGradient = LinearGradient(
         colors: [accentIndigo, accentCyan],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+
+    static let codexGradient = LinearGradient(
+        colors: [accentCodex, Color(hex: 0x14B8A6)],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )

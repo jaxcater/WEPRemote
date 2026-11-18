@@ -9,7 +9,7 @@ final class WEPTests: XCTestCase {
           "tunnelUrl": "https://demo-wep.trycloudflare.com",
           "lanUrl": "http://192.168.1.50:8420",
           "token": "wep_123456",
-          "version": "1.0.0"
+          "version": "2.0.0"
         }
         """.data(using: .utf8)!
 
@@ -20,9 +20,21 @@ final class WEPTests: XCTestCase {
         XCTAssertEqual(decoded.token, "wep_123456")
     }
 
-    func testExecutionModesHaveExpectedRawValues() {
-        XCTAssertEqual(ExecutionMode.auto.rawValue, "auto")
-        XCTAssertEqual(ExecutionMode.acceptEdits.rawValue, "accept-edits")
-        XCTAssertEqual(ExecutionMode.plan.rawValue, "plan")
+    func testAiModelOptionSeparatesEfforts() throws {
+        let json = """
+        {
+          "id": "gpt-6.1-sol",
+          "displayName": "GPT-6.1 Sol",
+          "engine": "codex",
+          "baseModel": "gpt-6.1-sol",
+          "defaultEffort": "medium",
+          "supportedEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"]
+        }
+        """.data(using: .utf8)!
+
+        let model = try JSONDecoder().decode(AiModelOption.self, from: json)
+        XCTAssertEqual(model.resolvedEngine, .codex)
+        XCTAssertEqual(model.efforts.count, 6)
+        XCTAssertEqual(model.defaultEffort, "medium")
     }
 }

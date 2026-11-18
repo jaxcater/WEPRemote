@@ -1,4 +1,61 @@
 import Foundation
+import SwiftUI
+
+enum AgentEngine: String, CaseIterable, Codable, Identifiable {
+    case antigravity = "antigravity"
+    case codex = "codex"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .antigravity: return "Antigravity"
+        case .codex: return "Codex"
+        }
+    }
+
+    var shortBadge: String {
+        switch self {
+        case .antigravity: return "AGY"
+        case .codex: return "CDX"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .antigravity: return "sparkles"
+        case .codex: return "cpu.fill"
+        }
+    }
+}
+
+enum ReasoningEffort: String, CaseIterable, Identifiable {
+    case low, medium, high, xhigh, max, ultra
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .low: return "Low"
+        case .medium: return "Med"
+        case .high: return "High"
+        case .xhigh: return "XHigh"
+        case .max: return "Max"
+        case .ultra: return "Ultra"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .low: return Color(hex: 0x9CA3AF)
+        case .medium: return Color(hex: 0x38BDF8)
+        case .high: return Color(hex: 0x6366F1)
+        case .xhigh: return Color(hex: 0xA855F7)
+        case .max: return Color(hex: 0xF59E0B)
+        case .ultra: return Color(hex: 0xEC4899)
+        }
+    }
+}
 
 struct HostProfile: Codable, Identifiable, Equatable {
     var id: String { "\(name)-\(token.prefix(8))" }
@@ -15,33 +72,77 @@ struct HealthResponse: Codable {
     let name: String?
     let version: String?
     let agyInstalled: Bool?
+    let codexInstalled: Bool?
     let tunnelUrl: String?
     let lanUrl: String?
+}
+
+struct CursorLiveState: Codable {
+    let isCursorRunning: Bool
+    let processCount: Int
+    let activeWorkspace: String?
+    let activeWindowTitles: [String]
+    let openWorkspaces: [String]
 }
 
 struct HostInfoResponse: Codable {
     let deviceName: String
     let agyInstalled: Bool
+    let codexInstalled: Bool?
     let defaultWorkspace: String
     let pinnedWorkspaces: [String]
     let tunnelUrl: String?
     let tunnelStatus: String?
     let lanUrl: String?
     let defaultSkipPermissions: Bool?
-    let models: [AgyModelInfo]
+    let cursorLive: CursorLiveState?
+    let models: [AiModelOption]
 }
 
-struct AgyModelInfo: Codable, Identifiable, Hashable {
+struct AiModelOption: Codable, Identifiable, Hashable {
     let id: String
     let displayName: String
+    let engine: String?
+    let baseModel: String?
+    let defaultEffort: String?
+    let supportedEfforts: [String]?
+
+    var resolvedEngine: AgentEngine {
+        AgentEngine(rawValue: engine ?? "antigravity") ?? .antigravity
+    }
+
+    var efforts: [String] {
+        if let list = supportedEfforts, !list.isEmpty { return list }
+        return ["low", "medium", "high"]
+    }
+}
+
+struct ExtensionItem: Codable, Identifiable {
+    let id: String
+    let name: String
+    let publisher: String
+    let version: String
+    let source: String
+    var enabled: Bool
+    let description: String
+    let installPath: String?
+}
+
+struct CodexThreadSummary: Codable, Identifiable {
+    let id: String
+    let title: String
+    let updatedAt: String
 }
 
 struct SessionRecord: Codable, Identifiable {
     let id: String
+    var engine: String?
     var agyConversationId: String?
+    var codexThreadId: String?
     var title: String
     var workspacePath: String
     var model: String
+    var effort: String?
     var mode: String
     var createdAt: String?
     var updatedAt: String?
@@ -51,6 +152,9 @@ struct SessionRecord: Codable, Identifiable {
 
 struct SessionTurn: Codable, Identifiable {
     let id: String
+    var engine: String?
+    var model: String?
+    var effort: String?
     var prompt: String
     var attachedFiles: [String]
     var responseText: String
@@ -197,4 +301,10 @@ struct SlashCommandItem: Identifiable {
         SlashCommandItem(id: "test", command: "/test", description: "Run tests and fix any failures", template: "Run the test suite and verify everything passes."),
         SlashCommandItem(id: "explain", command: "/explain", description: "Explain how this module or folder works", template: "Explain the architecture and key files in this workspace.")
     ]
+}
+
+struct GenericActionResponse: Codable {
+    let ok: Bool?
+    let message: String?
+    let output: String?
 }

@@ -5,6 +5,7 @@ enum MainSurfaceTab: String, CaseIterable {
     case chat
     case explorer
     case code
+    case extensions
     case terminal
 }
 
@@ -24,17 +25,28 @@ final class AppState: ObservableObject {
     @Published var isConnecting = false
 
     @Published var hostInfo: HostInfoResponse?
-    @Published var models: [AgyModelInfo] = [
-        AgyModelInfo(id: "gemini-4-hydrogen-high", displayName: "Gemini 4 Hydrogen (High)"),
-        AgyModelInfo(id: "gemini-4-argon-high", displayName: "Gemini 4 Argon (High)"),
-        AgyModelInfo(id: "gemini-3.8-flash-high", displayName: "Gemini 3.8 Flash (High)"),
-        AgyModelInfo(id: "claude-opus-5-5-high", displayName: "Claude Opus 5.5 (High)"),
-        AgyModelInfo(id: "claude-sonnet-5-5-high", displayName: "Claude Sonnet 5.5 (High)")
+    @Published var cursorLive: CursorLiveState?
+    @Published var extensions: [ExtensionItem] = []
+    @Published var codexThreads: [CodexThreadSummary] = []
+
+    @Published var models: [AiModelOption] = [
+        AiModelOption(id: "gemini-4-hydrogen", displayName: "Gemini 4 Hydrogen", engine: "antigravity", baseModel: "gemini-4-hydrogen", defaultEffort: "high", supportedEfforts: ["low", "medium", "high", "xhigh"]),
+        AiModelOption(id: "gemini-4-argon", displayName: "Gemini 4 Argon", engine: "antigravity", baseModel: "gemini-4-argon", defaultEffort: "high", supportedEfforts: ["low", "medium", "high"]),
+        AiModelOption(id: "gemini-3.8-flash", displayName: "Gemini 3.8 Flash", engine: "antigravity", baseModel: "gemini-3.8-flash", defaultEffort: "high", supportedEfforts: ["low", "medium", "high"]),
+        AiModelOption(id: "claude-opus-5-5", displayName: "Claude Opus 5.5", engine: "antigravity", baseModel: "claude-opus-5-5", defaultEffort: "high", supportedEfforts: ["low", "medium", "high"]),
+        AiModelOption(id: "claude-sonnet-5-5", displayName: "Claude Sonnet 5.5", engine: "antigravity", baseModel: "claude-sonnet-5-5", defaultEffort: "high", supportedEfforts: ["low", "medium", "high"]),
+        AiModelOption(id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", engine: "codex", baseModel: "gpt-6.1-sol", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"]),
+        AiModelOption(id: "gpt-6.1-terra", displayName: "GPT-6.1 Terra", engine: "codex", baseModel: "gpt-6.1-terra", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"]),
+        AiModelOption(id: "gpt-6-astra", displayName: "GPT-6 Astra", engine: "codex", baseModel: "gpt-6-astra", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"])
     ]
 
     @Published var activeWorkspace: String = ""
     @Published var pinnedWorkspaces: [String] = []
-    @Published var selectedModel: String = "gemini-4-hydrogen-high"
+
+    // Separated Engine / Model / Reasoning Effort state
+    @Published var selectedEngine: AgentEngine = .antigravity
+    @Published var selectedModel: String = "gemini-4-hydrogen"
+    @Published var selectedEffort: String = "high"
     @Published var selectedMode: ExecutionMode = .auto
     @Published var skipPermissions: Bool = true
 
@@ -56,10 +68,25 @@ final class AppState: ObservableObject {
     @Published var isSavingFile = false
     @Published var editorMessage: String?
 
-    // Git & Terminal state
+    // Git & Terminal & Extensions feedback
     @Published var gitStatus: GitStatusResponse?
     @Published var terminalLogs: [TerminalLogEntry] = []
     @Published var isRunningCommand = false
+    @Published var isLoadingExtensions = false
+    @Published var extensionStatusMessage: String?
+
+    var modelsForSelectedEngine: [AiModelOption] {
+        let filtered = models.filter { $0.resolvedEngine == selectedEngine }
+        return filtered.isEmpty ? models : filtered
+    }
+
+    var currentModelOption: AiModelOption? {
+        modelsForSelectedEngine.first(where: { $0.id == selectedModel }) ?? modelsForSelectedEngine.first
+    }
+
+    var supportedEffortsForCurrentModel: [String] {
+        currentModelOption?.efforts ?? ["low", "medium", "high"]
+    }
 
     var isEditorDirty: Bool {
         !openFilePath.isEmpty && editorContent != originalEditorContent
@@ -97,6 +124,32 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 self?.handleWsEvent(type: type, payload: payload)
             }
+        }
+    }
+
+    func selectEngine(_ engine: AgentEngine) {
+        selectedEngine = engine
+        let available = modelsForSelectedEngine
+        if !available.contains(where: { $0.id == selectedModel }), let first = available.first {
+            selectModel(first.id)
+        } else {
+            clampEffortToCurrentModel()
+        }
+    }
+
+    func selectModel(_ modelId: String) {
+        selectedModel = modelId
+        if let option = modelsForSelectedEngine.first(where: { $0.id == modelId }) {
+            if !option.efforts.contains(selectedEffort) {
+                selectedEffort = option.defaultEffort ?? option.efforts.first ?? "high"
+            }
+        }
+    }
+
+    private func clampEffortToCurrentModel() {
+        let supported = supportedEffortsForCurrentModel
+        if !supported.contains(selectedEffort) {
+            selectedEffort = currentModelOption?.defaultEffort ?? supported.first ?? "medium"
         }
     }
 
@@ -158,16 +211,19 @@ final class AppState: ObservableObject {
         do {
             let info = try await client.getInfo(token: token)
             self.hostInfo = info
-            if !info.models.isEmpty { self.models = info.models }
+            self.cursorLive = info.cursorLive
+            if !info.models.isEmpty {
+                self.models = info.models
+                clampEffortToCurrentModel()
+            }
             self.pinnedWorkspaces = info.pinnedWorkspaces
             if self.activeWorkspace.isEmpty {
-                self.activeWorkspace = info.defaultWorkspace
+                self.activeWorkspace = info.cursorLive?.activeWorkspace ?? info.defaultWorkspace
             }
             if let skip = info.defaultSkipPermissions {
                 self.skipPermissions = skip
             }
 
-            // Update stored tunnel/lan URLs if host reported fresh ones
             if var current = activeProfile {
                 var updated = false
                 if let t = info.tunnelUrl, !t.isEmpty, t != current.tunnelUrl {
@@ -196,9 +252,117 @@ final class AppState: ObservableObject {
                 }
             }
 
+            if let threads = try? await client.listCodexThreads(token: token) {
+                self.codexThreads = threads
+            }
+
             await refreshGitStatus()
         } catch {
             connectionError = error.localizedDescription
+        }
+    }
+
+    func syncWithActiveCursor() async {
+        guard let token = activeProfile?.token else { return }
+        if let live = try? await client.getCursorLive(token: token) {
+            self.cursorLive = live
+            if let ws = live.activeWorkspace, !ws.isEmpty {
+                await openFolderAsWorkspace(ws)
+            }
+        }
+    }
+
+    func openInCursor(path: String) async {
+        guard let token = activeProfile?.token, !path.isEmpty else { return }
+        _ = try? await client.openInCursor(path: path, token: token)
+    }
+
+    func resumeCodexThread(_ thread: CodexThreadSummary) async {
+        guard let token = activeProfile?.token else { return }
+        let ws = activeWorkspace.isEmpty ? (cursorLive?.activeWorkspace ?? hostInfo?.defaultWorkspace ?? "") : activeWorkspace
+        do {
+            let codexModel = selectedEngine == .codex ? selectedModel : "gpt-6.1-sol"
+            let session = try await client.importCodexThread(
+                threadId: thread.id,
+                title: thread.title,
+                workspacePath: ws,
+                model: codexModel,
+                effort: selectedEffort,
+                token: token
+            )
+            if !sessions.contains(where: { $0.id == session.id }) {
+                sessions.insert(session, at: 0)
+            }
+            selectSession(session)
+        } catch {
+            connectionError = error.localizedDescription
+        }
+    }
+
+    func refreshExtensions() async {
+        guard let token = activeProfile?.token else { return }
+        isLoadingExtensions = true
+        extensionStatusMessage = nil
+        do {
+            extensions = try await client.listExtensions(token: token)
+        } catch {
+            extensionStatusMessage = error.localizedDescription
+        }
+        isLoadingExtensions = false
+    }
+
+    func installExtension(id: String) async {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let token = activeProfile?.token else { return }
+        isLoadingExtensions = true
+        extensionStatusMessage = "Installing \(trimmed)..."
+        do {
+            _ = try await client.installExtension(id: trimmed, source: "cursor", token: token)
+            extensionStatusMessage = "Installed \(trimmed)"
+            await refreshExtensions()
+        } catch {
+            extensionStatusMessage = error.localizedDescription
+            isLoadingExtensions = false
+        }
+    }
+
+    func uninstallExtension(_ item: ExtensionItem) async {
+        guard let token = activeProfile?.token else { return }
+        isLoadingExtensions = true
+        extensionStatusMessage = "Removing \(item.id)..."
+        do {
+            _ = try await client.uninstallExtension(id: item.id, source: item.source, token: token)
+            extensionStatusMessage = "Removed \(item.id)"
+            await refreshExtensions()
+        } catch {
+            extensionStatusMessage = error.localizedDescription
+            isLoadingExtensions = false
+        }
+    }
+
+    func updateAllExtensions() async {
+        guard let token = activeProfile?.token else { return }
+        isLoadingExtensions = true
+        extensionStatusMessage = "Updating extensions..."
+        do {
+            _ = try await client.updateExtensions(token: token)
+            extensionStatusMessage = "Extensions updated"
+            await refreshExtensions()
+        } catch {
+            extensionStatusMessage = error.localizedDescription
+            isLoadingExtensions = false
+        }
+    }
+
+    func togglePlugin(_ item: ExtensionItem) async {
+        guard item.source == "antigravity", let token = activeProfile?.token else { return }
+        isLoadingExtensions = true
+        do {
+            _ = try await client.togglePlugin(id: item.id, enable: !item.enabled, token: token)
+            await refreshExtensions()
+        } catch {
+            extensionStatusMessage = error.localizedDescription
+            isLoadingExtensions = false
         }
     }
 
@@ -217,11 +381,17 @@ final class AppState: ObservableObject {
 
     func selectSession(_ session: SessionRecord) {
         activeSessionId = session.id
+        if let engStr = session.engine, let eng = AgentEngine(rawValue: engStr) {
+            selectedEngine = eng
+        }
         if !session.workspacePath.isEmpty {
             activeWorkspace = session.workspacePath
         }
         if !session.model.isEmpty {
             selectedModel = session.model
+        }
+        if let eff = session.effort, !eff.isEmpty {
+            selectedEffort = eff
         }
         if let mode = ExecutionMode(rawValue: session.mode) {
             selectedMode = mode
@@ -249,11 +419,12 @@ final class AppState: ObservableObject {
         let workspace = activeWorkspace.isEmpty ? (hostInfo?.defaultWorkspace ?? "") : activeWorkspace
 
         do {
-            // Ensure we have a session ID locally before streaming starts
             if activeSessionId == nil {
                 let created = try await client.createSession(
+                    engine: selectedEngine.rawValue,
                     workspacePath: workspace,
                     model: selectedModel,
+                    effort: selectedEffort,
                     mode: selectedMode.rawValue,
                     token: token
                 )
@@ -263,9 +434,11 @@ final class AppState: ObservableObject {
 
             try await client.startAgent(
                 sessionId: activeSessionId,
+                engine: selectedEngine.rawValue,
                 workspacePath: workspace,
                 prompt: trimmed,
                 model: selectedModel,
+                effort: selectedEffort,
                 mode: selectedMode.rawValue,
                 skipPermissions: skipPermissions,
                 attachedFiles: attachedFiles,
@@ -351,15 +524,23 @@ final class AppState: ObservableObject {
         if type == "agent.turn_started" {
             let turnId = payload["turnId"] as? String ?? UUID().uuidString
             let prompt = payload["prompt"] as? String ?? ""
+            let engine = payload["engine"] as? String ?? selectedEngine.rawValue
             let workspace = payload["workspacePath"] as? String ?? activeWorkspace
             let model = payload["model"] as? String ?? selectedModel
+            let effort = payload["effort"] as? String ?? selectedEffort
             let mode = payload["mode"] as? String ?? selectedMode.rawValue
 
             if let idx = sessions.firstIndex(where: { $0.id == sessionId }) {
                 sessions[idx].isRunning = true
+                sessions[idx].engine = engine
+                sessions[idx].model = model
+                sessions[idx].effort = effort
                 if !sessions[idx].turns.contains(where: { $0.id == turnId }) {
                     let turn = SessionTurn(
                         id: turnId,
+                        engine: engine,
+                        model: model,
+                        effort: effort,
                         prompt: prompt,
                         attachedFiles: [],
                         responseText: "",
@@ -378,10 +559,13 @@ final class AppState: ObservableObject {
             } else {
                 let newSession = SessionRecord(
                     id: sessionId,
+                    engine: engine,
                     agyConversationId: nil,
+                    codexThreadId: nil,
                     title: String(prompt.prefix(48)),
                     workspacePath: workspace,
                     model: model,
+                    effort: effort,
                     mode: mode,
                     createdAt: nil,
                     updatedAt: nil,
@@ -389,6 +573,9 @@ final class AppState: ObservableObject {
                     turns: [
                         SessionTurn(
                             id: turnId,
+                            engine: engine,
+                            model: model,
+                            effort: effort,
                             prompt: prompt,
                             attachedFiles: [],
                             responseText: "",
@@ -448,6 +635,9 @@ final class AppState: ObservableObject {
             }
             if let cid = payload["agyConversationId"] as? String {
                 sessions[sIdx].agyConversationId = cid
+            }
+            if let tid = payload["codexThreadId"] as? String {
+                sessions[sIdx].codexThreadId = tid
             }
             if let usageDict = payload["usage"] as? [String: Any],
                let data = try? JSONSerialization.data(withJSONObject: usageDict),

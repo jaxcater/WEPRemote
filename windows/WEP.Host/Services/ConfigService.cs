@@ -77,6 +77,18 @@ public sealed class ConfigService
             changed = true;
         }
 
+        if (string.IsNullOrWhiteSpace(Current.CodexExecutablePath) || !File.Exists(Current.CodexExecutablePath))
+        {
+            Current.CodexExecutablePath = DetectCodexPath();
+            changed = true;
+        }
+
+        if (string.IsNullOrWhiteSpace(Current.CursorCliPath) || !File.Exists(Current.CursorCliPath))
+        {
+            Current.CursorCliPath = DetectCursorCliPath();
+            changed = true;
+        }
+
         if (string.IsNullOrWhiteSpace(Current.DefaultWorkspace) || !Directory.Exists(Current.DefaultWorkspace))
         {
             Current.DefaultWorkspace = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -142,19 +154,11 @@ public sealed class ConfigService
     {
         try
         {
-            if (enabled)
-            {
-                SetThreadExecutionState(EXECUTION_STATE.ES_CONTINUOUS | EXECUTION_STATE.ES_SYSTEM_REQUIRED);
-            }
-            else
-            {
-                SetThreadExecutionState(EXECUTION_STATE.ES_CONTINUOUS);
-            }
+            SetThreadExecutionState(enabled
+                ? EXECUTION_STATE.ES_CONTINUOUS | EXECUTION_STATE.ES_SYSTEM_REQUIRED
+                : EXECUTION_STATE.ES_CONTINUOUS);
         }
-        catch
-        {
-            // Non-fatal if power state API is unavailable.
-        }
+        catch { }
     }
 
     public void ApplyAutoStart(bool enabled)
@@ -177,10 +181,7 @@ public sealed class ConfigService
                 key.DeleteValue(AppRegistryName, throwOnMissingValue: false);
             }
         }
-        catch
-        {
-            // Ignore registry permission errors.
-        }
+        catch { }
     }
 
     public static string DetectAgyPath()
@@ -189,22 +190,59 @@ public sealed class ConfigService
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".gemini", "bin", "agy.exe");
         if (File.Exists(userGeminiAgy)) return userGeminiAgy;
+        return FindOnPath("agy.exe") ?? userGeminiAgy;
+    }
 
+    public static string DetectCodexPath()
+    {
+        var extRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cursor", "extensions");
+        if (Directory.Exists(extRoot))
+        {
+            var candidates = Directory.EnumerateDirectories(extRoot, "openai.chatgpt-*")
+                .Where(d => !Path.GetFileName(d).StartsWith(".", StringComparison.Ordinal))
+                .OrderByDescending(d => d, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var dir in candidates)
+            {
+                var exe = Path.Combine(dir, "bin", "windows-x86_64", "codex.exe");
+                if (File.Exists(exe) && new FileInfo(exe).Length > 1024 * 1024)
+                {
+                    return exe;
+                }
+            }
+        }
+
+        return FindOnPath("codex.exe") ?? string.Empty;
+    }
+
+    public static string DetectCursorCliPath()
+    {
+        var localCmd = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs", "cursor", "resources", "app", "bin", "cursor.cmd");
+        if (File.Exists(localCmd)) return localCmd;
+
+        var localExe = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs", "cursor", "Cursor.exe");
+        if (File.Exists(localExe)) return localExe;
+
+        return FindOnPath("cursor.cmd") ?? FindOnPath("cursor.exe") ?? localCmd;
+    }
+
+    private static string? FindOnPath(string fileName)
+    {
         var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
         foreach (var dir in pathEnv.Split(';', StringSplitOptions.RemoveEmptyEntries))
         {
             try
             {
-                var candidate = Path.Combine(dir.Trim(), "agy.exe");
+                var candidate = Path.Combine(dir.Trim(), fileName);
                 if (File.Exists(candidate)) return candidate;
             }
-            catch
-            {
-                // Skip invalid PATH entry.
-            }
+            catch { }
         }
-
-        return userGeminiAgy;
+        return null;
     }
 
     private static string GenerateToken()
@@ -216,9 +254,7 @@ public sealed class ConfigService
     [Flags]
     private enum EXECUTION_STATE : uint
     {
-        ES_AWAYMODE_REQUIRED = 0x00000040,
         ES_CONTINUOUS = 0x80000000,
-        ES_DISPLAY_REQUIRED = 0x00000002,
         ES_SYSTEM_REQUIRED = 0x00000001
     }
 

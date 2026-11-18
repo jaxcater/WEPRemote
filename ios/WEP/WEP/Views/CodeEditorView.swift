@@ -91,6 +91,17 @@ struct CodeEditorView: View {
             Spacer()
 
             Button {
+                Task { await appState.openInCursor(path: appState.openFilePath) }
+            } label: {
+                Image(systemName: "cursorarrow.rays")
+                    .font(.system(size: 13))
+                    .foregroundColor(AgyTheme.accentCodex)
+                    .frame(width: 30, height: 30)
+                    .background(AgyTheme.bgElevated)
+                    .cornerRadius(7)
+            }
+
+            Button {
                 Task { await appState.openFileInEditor(path: appState.openFilePath) }
             } label: {
                 Image(systemName: "arrow.clockwise")

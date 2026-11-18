@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using WEP.Host.Models;
 using WEP.Host.Services;
 using Forms = System.Windows.Forms;
 
@@ -19,8 +20,11 @@ public partial class MainWindow : Window
     private readonly SessionStore _sessions;
     private readonly AgyRunnerService _agy;
     private readonly TunnelService _tunnel;
+    private readonly CursorExtensionService _cursorExt;
     private readonly WebApiServer _server;
+
     private string? _lastQrPayload;
+    private List<ExtensionItem> _loadedExtensions = new();
 
     public MainWindow(
         ConfigService config,
@@ -28,6 +32,7 @@ public partial class MainWindow : Window
         SessionStore sessions,
         AgyRunnerService agy,
         TunnelService tunnel,
+        CursorExtensionService cursorExt,
         WebApiServer server)
     {
         InitializeComponent();
@@ -37,6 +42,7 @@ public partial class MainWindow : Window
         _sessions = sessions;
         _agy = agy;
         _tunnel = tunnel;
+        _cursorExt = cursorExt;
         _server = server;
 
         LoadConfigToUi();
@@ -54,6 +60,7 @@ public partial class MainWindow : Window
         _agy.ActiveRunsChanged += () => Dispatcher.InvokeAsync(RefreshStatusUi);
 
         RefreshStatusUi();
+        _ = RefreshCursorAndExtensionsAsync();
     }
 
     private void LoadConfigToUi()
@@ -62,6 +69,8 @@ public partial class MainWindow : Window
         DeviceNameBox.Text = c.DeviceName;
         PortBox.Text = c.Port.ToString();
         AgyPathBox.Text = c.AgyExecutablePath;
+        CodexPathBox.Text = c.CodexExecutablePath;
+        CursorPathBox.Text = c.CursorCliPath;
         DefaultWorkspaceBox.Text = c.DefaultWorkspace;
         TokenBox.Text = c.AuthToken;
         CfTokenBox.Text = c.CloudflareTunnelToken;
@@ -97,6 +106,59 @@ public partial class MainWindow : Window
             LogTextBox.AppendText(entry.Formatted + Environment.NewLine);
         }
         LogTextBox.ScrollToEnd();
+    }
+
+    private async Task RefreshCursorAndExtensionsAsync()
+    {
+        try
+        {
+            var live = await Task.Run(() => _cursorExt.GetLiveCursorState());
+            var threads = await Task.Run(() => _cursorExt.ListCodexThreads(25));
+            var exts = await _cursorExt.ListAllExtensionsAsync();
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                HeaderCursorStatus.Text = live.IsCursorRunning
+                    ? $"Cursor Live ({live.ProcessCount})"
+                    : "Cursor Idle";
+                CursorDot.Fill = live.IsCursorRunning
+                    ? new SolidColorBrush(System.Windows.Media.Color.FromRgb(56, 189, 248))
+                    : new SolidColorBrush(System.Windows.Media.Color.FromRgb(107, 114, 128));
+
+                CursorLiveWorkspaceText.Text = string.IsNullOrWhiteSpace(live.ActiveWorkspace)
+                    ? "No recent Cursor workspace detected"
+                    : live.ActiveWorkspace;
+                CursorWindowTitlesText.Text = live.ActiveWindowTitles.Count > 0
+                    ? "Windows: " + string.Join(" | ", live.ActiveWindowTitles)
+                    : "Cursor is not showing an active window title.";
+
+                CursorWorkspacesList.Items.Clear();
+                foreach (var ws in live.OpenWorkspaces)
+                {
+                    CursorWorkspacesList.Items.Add(ws);
+                }
+
+                CodexThreadsList.Items.Clear();
+                foreach (var t in threads)
+                {
+                    CodexThreadsList.Items.Add($"[Codex] {t.Title}  ({t.Id[..Math.Min(8, t.Id.Length)]})");
+                }
+
+                _loadedExtensions = exts;
+                ExtensionsListBox.Items.Clear();
+                foreach (var ext in exts)
+                {
+                    var badge = ext.Source == "antigravity"
+                        ? (ext.Enabled ? "[AGY Plugin • ON]" : "[AGY Plugin • OFF]")
+                        : "[Cursor Ext]";
+                    ExtensionsListBox.Items.Add($"{badge} {ext.Name}  ({ext.Id} v{ext.Version}) — {ext.Publisher}");
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("UI", $"Refresh Cursor/Extensions error: {ex.Message}");
+        }
     }
 
     private void RefreshStatusUi()
@@ -147,9 +209,9 @@ public partial class MainWindow : Window
         HeaderClientsBadge.Text = $"{_server.ConnectedClientsCount} iOS Connected";
         ActiveRunsText.Text = $"Active Agent Runs: {_agy.ActiveRunCount}";
 
-        AgyStatusText.Text = _agy.IsAgyInstalled
-            ? "Antigravity CLI: Ready (agy.exe detected)"
-            : "Antigravity CLI: Not found (check path)";
+        EnginesSummaryText.Text =
+            $"Antigravity: {(_agy.IsAgyInstalled ? "Ready" : "Missing")}  •  " +
+            $"Codex: {(_agy.IsCodexInstalled ? "Ready" : "Missing")}";
 
         TokenBox.Text = _config.Current.AuthToken;
 
@@ -193,6 +255,103 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void RefreshCursorLive_Click(object sender, RoutedEventArgs e)
+    {
+        await RefreshCursorAndExtensionsAsync();
+    }
+
+    private void SyncCursorWorkspace_Click(object sender, RoutedEventArgs e)
+    {
+        var live = _cursorExt.GetLiveCursorState();
+        if (!string.IsNullOrWhiteSpace(live.ActiveWorkspace))
+        {
+            _config.Current.DefaultWorkspace = live.ActiveWorkspace;
+            _config.AddPinnedWorkspace(live.ActiveWorkspace);
+            DefaultWorkspaceBox.Text = live.ActiveWorkspace;
+            _config.Save();
+            _log.Info("Cursor", $"Synced DefaultWorkspace to active Cursor folder: {live.ActiveWorkspace}");
+        }
+    }
+
+    private async void OpenSelectedInCursor_Click(object sender, RoutedEventArgs e)
+    {
+        if (CursorWorkspacesList.SelectedItem is string path)
+        {
+            await _cursorExt.OpenInCursorAsync(path);
+        }
+    }
+
+    private async void RefreshExtensions_Click(object sender, RoutedEventArgs e)
+    {
+        ExtStatusText.Text = "Refreshing...";
+        await RefreshCursorAndExtensionsAsync();
+        ExtStatusText.Text = $"{_loadedExtensions.Count} items loaded";
+    }
+
+    private async void InstallExtension_Click(object sender, RoutedEventArgs e)
+    {
+        var id = ExtensionInstallBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(id)) return;
+
+        InstallExtBtn.IsEnabled = false;
+        ExtStatusText.Text = $"Installing {id}...";
+        try
+        {
+            var (ok, output) = await _cursorExt.ManageExtensionAsync("install", id, "cursor");
+            ExtStatusText.Text = ok ? $"Installed {id}" : output;
+            ExtensionInstallBox.Clear();
+            await RefreshCursorAndExtensionsAsync();
+        }
+        finally
+        {
+            InstallExtBtn.IsEnabled = true;
+        }
+    }
+
+    private async void UpdateExtensions_Click(object sender, RoutedEventArgs e)
+    {
+        ExtStatusText.Text = "Updating Cursor extensions...";
+        await _cursorExt.ManageExtensionAsync("update", "", "cursor");
+        await RefreshCursorAndExtensionsAsync();
+        ExtStatusText.Text = "Extensions updated";
+    }
+
+    private async void UninstallSelectedExtension_Click(object sender, RoutedEventArgs e)
+    {
+        var idx = ExtensionsListBox.SelectedIndex;
+        if (idx < 0 || idx >= _loadedExtensions.Count) return;
+
+        var ext = _loadedExtensions[idx];
+        var confirm = System.Windows.MessageBox.Show(
+            $"Uninstall {ext.Name} ({ext.Id})?",
+            "Uninstall Extension", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
+
+        ExtStatusText.Text = $"Removing {ext.Id}...";
+        await _cursorExt.ManageExtensionAsync("uninstall", ext.Id, ext.Source);
+        await RefreshCursorAndExtensionsAsync();
+        ExtStatusText.Text = $"Removed {ext.Id}";
+    }
+
+    private async void ToggleSelectedPlugin_Click(object sender, RoutedEventArgs e)
+    {
+        var idx = ExtensionsListBox.SelectedIndex;
+        if (idx < 0 || idx >= _loadedExtensions.Count) return;
+
+        var ext = _loadedExtensions[idx];
+        if (ext.Source != "antigravity")
+        {
+            ExtStatusText.Text = "Toggle enable/disable applies to Antigravity plugins; use Uninstall for Cursor extensions.";
+            return;
+        }
+
+        var action = ext.Enabled ? "disable" : "enable";
+        ExtStatusText.Text = $"{action} {ext.Id}...";
+        await _cursorExt.ManageExtensionAsync(action, ext.Id, "antigravity");
+        await RefreshCursorAndExtensionsAsync();
+        ExtStatusText.Text = $"Plugin {ext.Id} updated";
+    }
+
     private void SaveSettings_Click(object sender, RoutedEventArgs e)
     {
         var c = _config.Current;
@@ -202,6 +361,8 @@ public partial class MainWindow : Window
             c.Port = port;
         }
         c.AgyExecutablePath = AgyPathBox.Text.Trim();
+        c.CodexExecutablePath = CodexPathBox.Text.Trim();
+        c.CursorCliPath = CursorPathBox.Text.Trim();
         c.DefaultWorkspace = DefaultWorkspaceBox.Text.Trim();
         c.CloudflareTunnelToken = CfTokenBox.Text.Trim();
         c.CustomPublicDomain = CustomDomainBox.Text.Trim();
@@ -224,14 +385,14 @@ public partial class MainWindow : Window
         _log.Info("Config", "Settings saved.");
         RefreshStatusUi();
         System.Windows.MessageBox.Show("Settings saved. Restart Gateway or Tunnel if you changed Port or Tunnel mode.",
-            "WEP Host", MessageBoxButton.OK, MessageBoxImage.Information);
+            "WEP Studio Host", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void BrowseWorkspace_Click(object sender, RoutedEventArgs e)
     {
         using var dlg = new Forms.FolderBrowserDialog
         {
-            Description = "Select default Antigravity workspace folder",
+            Description = "Select default workspace folder",
             SelectedPath = DefaultWorkspaceBox.Text
         };
         if (dlg.ShowDialog() == Forms.DialogResult.OK)

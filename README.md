@@ -1,8 +1,8 @@
-# WEP — Điều Khiển Antigravity & Code Từ Xa Trên iPhone
+# WEP v2.0 — Antigravity, Codex & Live Cursor Remote (Windows + iPhone)
 
-**WEP** là hệ thống điều khiển **Google Antigravity (`agy`)** và lập trình từ xa trên máy tính Windows ở nhà thông qua ứng dụng **WEP trên iPhone** — giao diện mô phỏng trực tiếp Antigravity dành cho iOS.
+**WEP** là hệ thống điều khiển **Google Antigravity (`agy`)**, **OpenAI Codex (`codex`)** và **phiên làm việc Cursor đang mở** trên máy tính Windows ở nhà thông qua ứng dụng **WEP trên iPhone**.
 
-> Mở máy tính Windows ở nhà -> bật **WEP Host** -> cầm iPhone đi bất cứ đâu (Wi-Fi / 4G / 5G) vẫn có thể mở thư mục, sửa code trực tiếp, chạy terminal PowerShell và điều khiển AI Agent Antigravity theo thời gian thực.
+> Mở máy tính Windows (và Cursor) ở nhà -> bật **WEP Studio Host** -> cầm iPhone đi bất cứ đâu (Wi-Fi / 4G / 5G) vẫn có thể đồng bộ trực tiếp thư mục Cursor đang mở, chọn riêng **Engine (`Antigravity` / `Codex`)**, **Model**, và **Mức độ nỗ lực (`Low / Medium / High / XHigh / Max / Ultra`)**, quản lý **Extensions & Plugins**, mở thư mục, sửa code trực tiếp và chạy terminal PowerShell.
 
 ---
 

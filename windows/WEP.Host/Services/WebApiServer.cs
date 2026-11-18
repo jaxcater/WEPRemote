@@ -27,6 +27,7 @@ public sealed class WebApiServer : IAsyncDisposable
     private readonly WorkspaceService _workspace;
     private readonly AgyRunnerService _agy;
     private readonly TunnelService _tunnel;
+    private readonly CursorExtensionService _cursorExt;
     private readonly LogService _log;
 
     private readonly ConcurrentDictionary<string, WebSocket> _wsClients = new();
@@ -46,6 +47,7 @@ public sealed class WebApiServer : IAsyncDisposable
         WorkspaceService workspace,
         AgyRunnerService agy,
         TunnelService tunnel,
+        CursorExtensionService cursorExt,
         LogService log)
     {
         _config = config;
@@ -53,6 +55,7 @@ public sealed class WebApiServer : IAsyncDisposable
         _workspace = workspace;
         _agy = agy;
         _tunnel = tunnel;
+        _cursorExt = cursorExt;
         _log = log;
 
         _agy.BroadcastEvent += BroadcastWsAsync;
@@ -203,8 +206,9 @@ public sealed class WebApiServer : IAsyncDisposable
                 ok = true,
                 authenticated = authed,
                 name = _config.Current.DeviceName,
-                version = "1.0.0",
+                version = "2.0.0",
                 agyInstalled = _agy.IsAgyInstalled,
+                codexInstalled = _agy.IsCodexInstalled,
                 tunnelUrl = authed ? _tunnel.PublicUrl : null,
                 lanUrl = authed ? GetLanUrl() : null
             });
@@ -213,18 +217,86 @@ public sealed class WebApiServer : IAsyncDisposable
         app.MapGet("/api/info", async (CancellationToken ct) =>
         {
             var models = await _agy.GetModelsAsync(false, ct);
+            var cursorLive = _cursorExt.GetLiveCursorState();
+            var defaultWs = !string.IsNullOrWhiteSpace(cursorLive.ActiveWorkspace)
+                ? cursorLive.ActiveWorkspace
+                : _config.Current.DefaultWorkspace;
+
             return Results.Ok(new
             {
                 deviceName = _config.Current.DeviceName,
                 agyInstalled = _agy.IsAgyInstalled,
-                defaultWorkspace = _config.Current.DefaultWorkspace,
+                codexInstalled = _agy.IsCodexInstalled,
+                defaultWorkspace = defaultWs,
                 pinnedWorkspaces = _config.Current.PinnedWorkspaces,
                 tunnelUrl = _tunnel.PublicUrl,
                 tunnelStatus = _tunnel.Status,
                 lanUrl = GetLanUrl(),
                 defaultSkipPermissions = _config.Current.DefaultSkipPermissions,
+                cursorLive,
                 models
             });
+        });
+
+        app.MapGet("/api/cursor/live", () => Results.Ok(_cursorExt.GetLiveCursorState()));
+
+        app.MapPost("/api/cursor/open", async (CursorOpenRequest req) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Path)) return Results.BadRequest(new { error = "Path is required." });
+            var (ok, msg) = await _cursorExt.OpenInCursorAsync(req.Path, req.Line);
+            return ok ? Results.Ok(new { ok, message = msg }) : Results.BadRequest(new { error = msg });
+        });
+
+        app.MapGet("/api/extensions", async (CancellationToken ct) =>
+        {
+            var list = await _cursorExt.ListAllExtensionsAsync(ct);
+            return Results.Ok(list);
+        });
+
+        app.MapPost("/api/extensions/install", async (ExtensionActionRequest req, CancellationToken ct) =>
+        {
+            var (ok, output) = await _cursorExt.ManageExtensionAsync("install", req.Id, req.Source, ct);
+            return ok ? Results.Ok(new { ok, output }) : Results.BadRequest(new { error = output });
+        });
+
+        app.MapPost("/api/extensions/uninstall", async (ExtensionActionRequest req, CancellationToken ct) =>
+        {
+            var (ok, output) = await _cursorExt.ManageExtensionAsync("uninstall", req.Id, req.Source, ct);
+            return ok ? Results.Ok(new { ok, output }) : Results.BadRequest(new { error = output });
+        });
+
+        app.MapPost("/api/extensions/update", async (CancellationToken ct) =>
+        {
+            var (ok, output) = await _cursorExt.ManageExtensionAsync("update", "", "cursor", ct);
+            return ok ? Results.Ok(new { ok, output }) : Results.BadRequest(new { error = output });
+        });
+
+        app.MapPost("/api/extensions/plugin-toggle", async (ExtensionActionRequest req, CancellationToken ct) =>
+        {
+            var action = req.Enable == true ? "enable" : "disable";
+            var (ok, output) = await _cursorExt.ManageExtensionAsync(action, req.Id, req.Source, ct);
+            return ok ? Results.Ok(new { ok, output }) : Results.BadRequest(new { error = output });
+        });
+
+        app.MapGet("/api/codex/threads", () => Results.Ok(_cursorExt.ListCodexThreads()));
+
+        app.MapPost("/api/codex/import", (CodexImportRequest req) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.ThreadId)) return Results.BadRequest(new { error = "ThreadId required." });
+            var existing = _sessions.ListAll().FirstOrDefault(s =>
+                string.Equals(s.CodexThreadId, req.ThreadId, StringComparison.OrdinalIgnoreCase));
+            if (existing != null) return Results.Ok(existing);
+
+            var ws = string.IsNullOrWhiteSpace(req.WorkspacePath)
+                ? (_cursorExt.GetLiveCursorState().ActiveWorkspace ?? _config.Current.DefaultWorkspace)
+                : req.WorkspacePath;
+            var session = _sessions.CreateOrGet(null, ws, req.Model ?? "gpt-6.1-sol", "auto");
+            session.Engine = "codex";
+            session.CodexThreadId = req.ThreadId;
+            session.Effort = req.Effort ?? "medium";
+            session.Title = string.IsNullOrWhiteSpace(req.Title) ? "Codex Session" : req.Title;
+            _sessions.Save(session);
+            return Results.Ok(session);
         });
 
         app.MapGet("/api/models", async (bool? refresh, CancellationToken ct) =>
@@ -244,13 +316,16 @@ public sealed class WebApiServer : IAsyncDisposable
         app.MapPost("/api/sessions", (WsIncomingMessage req) =>
         {
             var ws = string.IsNullOrWhiteSpace(req.WorkspacePath)
-                ? _config.Current.DefaultWorkspace
+                ? (_cursorExt.GetLiveCursorState().ActiveWorkspace ?? _config.Current.DefaultWorkspace)
                 : req.WorkspacePath;
             var s = _sessions.CreateOrGet(
                 req.SessionId,
                 ws,
-                req.Model ?? "gemini-4-hydrogen-high",
+                req.Model ?? "gemini-4-hydrogen",
                 req.Mode ?? "auto");
+            if (!string.IsNullOrWhiteSpace(req.Engine)) s.Engine = req.Engine;
+            if (!string.IsNullOrWhiteSpace(req.Effort)) s.Effort = req.Effort;
+            _sessions.Save(s);
             return Results.Ok(s);
         });
 
@@ -376,9 +451,11 @@ public sealed class WebApiServer : IAsyncDisposable
 
             await _agy.StartTurnAsync(
                 req.SessionId,
+                req.Engine,
                 req.WorkspacePath ?? _config.Current.DefaultWorkspace,
                 req.Prompt,
                 req.Model,
+                req.Effort,
                 req.Mode,
                 req.SkipPermissions,
                 req.AttachedFiles);
@@ -469,9 +546,11 @@ public sealed class WebApiServer : IAsyncDisposable
                     {
                         await _agy.StartTurnAsync(
                             msg.SessionId,
+                            msg.Engine,
                             msg.WorkspacePath ?? _config.Current.DefaultWorkspace,
                             msg.Prompt,
                             msg.Model,
+                            msg.Effort,
                             msg.Mode,
                             msg.SkipPermissions,
                             msg.AttachedFiles);

@@ -8,7 +8,7 @@ struct MainShellView: View {
             AgyTheme.bgCanvas.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                topAntigravityBar
+                topStudioBar
                 Divider().background(AgyTheme.borderSubtle)
 
                 Group {
@@ -19,6 +19,8 @@ struct MainShellView: View {
                         FileExplorerView()
                     case .code:
                         CodeEditorView()
+                    case .extensions:
+                        ExtensionsView()
                     case .terminal:
                         TerminalView()
                     }
@@ -29,7 +31,7 @@ struct MainShellView: View {
             }
 
             if appState.showSidebar {
-                Color.black.opacity(0.55)
+                Color.black.opacity(0.58)
                     .ignoresSafeArea()
                     .onTapGesture {
                         withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
@@ -38,7 +40,7 @@ struct MainShellView: View {
                     }
 
                 SidebarView()
-                    .frame(width: 300)
+                    .frame(width: 312)
                     .transition(.move(edge: .leading))
                     .zIndex(2)
             }
@@ -60,38 +62,38 @@ struct MainShellView: View {
         }
     }
 
-    private var topAntigravityBar: some View {
-        HStack(spacing: 10) {
+    private var topStudioBar: some View {
+        HStack(spacing: 8) {
             Button {
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
                     appState.showSidebar.toggle()
                 }
             } label: {
                 Image(systemName: "sidebar.left")
-                    .font(.system(size: 17, weight: .medium))
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundColor(AgyTheme.textPrimary)
                     .frame(width: 34, height: 34)
                     .background(AgyTheme.bgCard)
-                    .cornerRadius(8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(AgyTheme.borderSubtle, lineWidth: 1))
+                    .cornerRadius(9)
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(AgyTheme.borderSubtle, lineWidth: 1))
             }
 
             Button {
                 appState.activeTab = .explorer
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "folder.fill")
+                    Image(systemName: (appState.cursorLive?.isCursorRunning == true) ? "cursorarrow.rays" : "folder.fill")
                         .font(.system(size: 12))
-                        .foregroundColor(AgyTheme.accentCyan)
+                        .foregroundColor((appState.cursorLive?.isCursorRunning == true) ? AgyTheme.accentCodex : AgyTheme.accentCyan)
                     Text(workspaceShortName)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(AgyTheme.textPrimary)
                         .lineLimit(1)
                     if let branch = appState.gitStatus?.branch, !branch.isEmpty {
                         Text(branch)
-                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .foregroundColor(AgyTheme.accentIndigo)
-                            .padding(.horizontal, 6)
+                            .padding(.horizontal, 5)
                             .padding(.vertical, 2)
                             .background(AgyTheme.accentIndigo.opacity(0.16))
                             .cornerRadius(5)
@@ -100,11 +102,31 @@ struct MainShellView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(AgyTheme.bgCard)
-                .cornerRadius(8)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(AgyTheme.borderSubtle, lineWidth: 1))
+                .cornerRadius(9)
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(AgyTheme.borderSubtle, lineWidth: 1))
             }
 
             Spacer()
+
+            if appState.cursorLive?.isCursorRunning == true {
+                Button {
+                    Task { await appState.syncWithActiveCursor() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(AgyTheme.accentCodex)
+                            .frame(width: 6, height: 6)
+                        Text("Cursor")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(AgyTheme.accentCodex)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(AgyTheme.accentCodex.opacity(0.13))
+                    .cornerRadius(12)
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(AgyTheme.accentCodex.opacity(0.35), lineWidth: 1))
+                }
+            }
 
             Button {
                 if let profile = appState.activeProfile {
@@ -118,10 +140,10 @@ struct MainShellView: View {
                         .fill(appState.isConnected ? AgyTheme.success : AgyTheme.danger)
                         .frame(width: 7, height: 7)
                     Text(appState.isConnected ? appState.connectionRoute : "Offline")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundColor(AgyTheme.textSecondary)
                 }
-                .padding(.horizontal, 9)
+                .padding(.horizontal, 8)
                 .padding(.vertical, 5)
                 .background(AgyTheme.bgCard)
                 .cornerRadius(12)
@@ -133,12 +155,12 @@ struct MainShellView: View {
             } label: {
                 ZStack(alignment: .topTrailing) {
                     Image(systemName: "rectangle.righthalf.inset.filled")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                         .foregroundColor(AgyTheme.textPrimary)
                         .frame(width: 34, height: 34)
                         .background(AgyTheme.bgCard)
-                        .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AgyTheme.borderSubtle, lineWidth: 1))
+                        .cornerRadius(9)
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(AgyTheme.borderSubtle, lineWidth: 1))
 
                     if let count = appState.gitStatus?.changedFiles.count, count > 0 {
                         Text("\(count)")
@@ -163,6 +185,7 @@ struct MainShellView: View {
             tabButton(.chat, icon: "sparkles", label: "Agent")
             tabButton(.explorer, icon: "folder", label: "Folders")
             tabButton(.code, icon: "chevron.left.forwardslash.chevron.right", label: appState.isEditorDirty ? "Code *" : "Code")
+            tabButton(.extensions, icon: "puzzlepiece.extension", label: "Extensions")
             tabButton(.terminal, icon: "terminal", label: "Terminal")
         }
         .padding(.top, 6)
@@ -178,9 +201,9 @@ struct MainShellView: View {
         } label: {
             VStack(spacing: 3) {
                 Image(systemName: icon)
-                    .font(.system(size: 16, weight: selected ? .semibold : .regular))
+                    .font(.system(size: 15, weight: selected ? .semibold : .regular))
                 Text(label)
-                    .font(.system(size: 10.5, weight: selected ? .semibold : .medium))
+                    .font(.system(size: 10, weight: selected ? .semibold : .medium))
             }
             .foregroundColor(selected ? AgyTheme.accentCyan : AgyTheme.textSecondary)
             .frame(maxWidth: .infinity)

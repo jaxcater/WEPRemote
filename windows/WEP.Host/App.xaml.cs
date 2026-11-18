@@ -21,6 +21,7 @@ public partial class App : System.Windows.Application
     private WorkspaceService? _workspace;
     private AgyRunnerService? _agy;
     private TunnelService? _tunnel;
+    private CursorExtensionService? _cursorExt;
     private WebApiServer? _server;
 
     private MainWindow? _mainWindow;
@@ -56,9 +57,10 @@ public partial class App : System.Windows.Application
         _workspace = new WorkspaceService(_config, _log);
         _agy = new AgyRunnerService(_config, _sessions, _log);
         _tunnel = new TunnelService(_config, _log);
-        _server = new WebApiServer(_config, _sessions, _workspace, _agy, _tunnel, _log);
+        _cursorExt = new CursorExtensionService(_config, _log);
+        _server = new WebApiServer(_config, _sessions, _workspace, _agy, _tunnel, _cursorExt, _log);
 
-        _mainWindow = new MainWindow(_config, _log, _sessions, _agy, _tunnel, _server);
+        _mainWindow = new MainWindow(_config, _log, _sessions, _agy, _tunnel, _cursorExt, _server);
         _mainWindow.Closing += MainWindow_Closing;
 
         SetupTrayIcon();

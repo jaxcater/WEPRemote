@@ -52,7 +52,7 @@ struct ChatCanvasView: View {
                     }
                 }
             } else {
-                emptyAntigravityCanvas
+                emptyStudioCanvas
             }
 
             if showSlashMenu {
@@ -71,31 +71,51 @@ struct ChatCanvasView: View {
         }
     }
 
-    private var emptyAntigravityCanvas: some View {
+    private var emptyStudioCanvas: some View {
         ScrollView {
             VStack(spacing: 18) {
-                Spacer(minLength: 28)
+                Spacer(minLength: 22)
 
                 ZStack {
                     Circle()
-                        .fill(AgyTheme.brandGradient.opacity(0.18))
+                        .fill((appState.selectedEngine == .codex ? AgyTheme.codexGradient : AgyTheme.brandGradient).opacity(0.20))
                         .frame(width: 72, height: 72)
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 32, weight: .semibold))
-                        .foregroundStyle(AgyTheme.brandGradient)
+                    Image(systemName: appState.selectedEngine.icon)
+                        .font(.system(size: 30, weight: .semibold))
+                        .foregroundStyle(appState.selectedEngine == .codex ? AgyTheme.codexGradient : AgyTheme.brandGradient)
                 }
 
                 VStack(spacing: 6) {
-                    Text("Antigravity Remote")
+                    Text("\(appState.selectedEngine.displayName) Remote")
                         .font(.system(size: 22, weight: .bold))
                         .foregroundColor(AgyTheme.textPrimary)
                     Text(appState.activeWorkspace.isEmpty
-                         ? "Pair your Windows PC or open a folder to start coding"
+                         ? "Pair your Windows PC or sync with your open Cursor window"
                          : appState.activeWorkspace)
-                        .font(.system(size: 12.5, design: .monospaced))
+                        .font(.system(size: 12, design: .monospaced))
                         .foregroundColor(AgyTheme.textSecondary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 20)
+                }
+
+                if let cursorWs = appState.cursorLive?.activeWorkspace,
+                   appState.cursorLive?.isCursorRunning == true,
+                   cursorWs.caseInsensitiveCompare(appState.activeWorkspace) != .orderedSame {
+                    Button {
+                        Task { await appState.syncWithActiveCursor() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "cursorarrow.rays")
+                            Text("Sync to Active Cursor: \((cursorWs.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent)")
+                                .font(.system(size: 12.5, weight: .semibold))
+                        }
+                        .foregroundColor(AgyTheme.accentCodex)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(AgyTheme.accentCodex.opacity(0.14))
+                        .cornerRadius(10)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AgyTheme.accentCodex.opacity(0.4), lineWidth: 1))
+                    }
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
@@ -105,17 +125,17 @@ struct ChatCanvasView: View {
                     starterCard(icon: "doc.text.magnifyingglass", title: "Explain Repo", subtitle: "Map architecture") {
                         promptText = "Analyze this workspace folder and explain its architecture, entry points, and build setup."
                     }
-                    starterCard(icon: "wrench.and.screwdriver", title: "Fix & Build", subtitle: "Run build & resolve errors") {
-                        promptText = "Check the project build and tests, then fix any issues."
+                    starterCard(icon: "puzzlepiece.extension", title: "Extensions", subtitle: "Manage Cursor & AGY") {
+                        appState.activeTab = .extensions
                     }
                     starterCard(icon: "terminal", title: "Remote Shell", subtitle: "Run PowerShell commands") {
                         appState.activeTab = .terminal
                     }
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, 8)
+                .padding(.top, 4)
             }
-            .padding(.bottom, 24)
+            .padding(.bottom, 20)
         }
     }
 
@@ -172,7 +192,7 @@ struct ChatCanvasView: View {
     }
 
     private var composerPanel: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 7) {
             if !attachedFiles.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
@@ -200,8 +220,116 @@ struct ChatCanvasView: View {
                 }
             }
 
+            // BAR 1: Separated Engine + Model Selector Bar
+            HStack(spacing: 8) {
+                HStack(spacing: 2) {
+                    ForEach(AgentEngine.allCases) { eng in
+                        let active = appState.selectedEngine == eng
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                appState.selectEngine(eng)
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: eng.icon)
+                                    .font(.system(size: 10))
+                                Text(eng.displayName)
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundColor(active ? .white : AgyTheme.textSecondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(active
+                                ? (eng == .codex ? AnyShapeStyle(AgyTheme.codexGradient) : AnyShapeStyle(AgyTheme.brandGradient))
+                                : AnyShapeStyle(Color.clear))
+                            .cornerRadius(7)
+                        }
+                    }
+                }
+                .padding(2)
+                .background(AgyTheme.bgCard)
+                .cornerRadius(9)
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(AgyTheme.borderSubtle, lineWidth: 1))
+
+                // Separate Model Selector Pill
+                Menu {
+                    ForEach(appState.modelsForSelectedEngine) { m in
+                        Button {
+                            appState.selectModel(m.id)
+                        } label: {
+                            HStack {
+                                Text(m.displayName)
+                                if m.id == appState.selectedModel {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "cube.transparent")
+                            .font(.system(size: 11))
+                            .foregroundColor(AgyTheme.accentCyan)
+                        Text(appState.currentModelOption?.displayName ?? appState.selectedModel)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundColor(AgyTheme.textPrimary)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9))
+                            .foregroundColor(AgyTheme.textMuted)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(AgyTheme.bgCard)
+                    .cornerRadius(9)
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(AgyTheme.borderSubtle, lineWidth: 1))
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+
+            // BAR 2: Dedicated Reasoning Effort Pill Strip (low, medium, high, xhigh, max, ultra)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "gauge.with.needle")
+                            .font(.system(size: 10))
+                        Text("Effort")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    .foregroundColor(AgyTheme.textMuted)
+                    .padding(.trailing, 2)
+
+                    ForEach(appState.supportedEffortsForCurrentModel, id: \.self) { effRaw in
+                        let eff = ReasoningEffort(rawValue: effRaw)
+                        let selected = appState.selectedEffort == effRaw
+                        let tint = eff?.color ?? AgyTheme.accentIndigo
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.12)) {
+                                appState.selectedEffort = effRaw
+                            }
+                        } label: {
+                            Text(eff?.label ?? effRaw.capitalized)
+                                .font(.system(size: 11, weight: selected ? .bold : .medium, design: .monospaced))
+                                .foregroundColor(selected ? .white : AgyTheme.textSecondary)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(selected ? tint.opacity(0.85) : AgyTheme.bgCard)
+                                .cornerRadius(7)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7)
+                                        .stroke(selected ? tint : AgyTheme.borderSubtle, lineWidth: 1)
+                                )
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+
+            // Input Box
             VStack(spacing: 8) {
-                TextField("Ask Antigravity to edit, run, or build...", text: $promptText, axis: .vertical)
+                TextField("Ask \(appState.selectedEngine.displayName) to edit, debug, or build...", text: $promptText, axis: .vertical)
                     .lineLimit(1...6)
                     .font(.system(size: 14.5))
                     .foregroundColor(AgyTheme.textPrimary)
@@ -233,35 +361,6 @@ struct ChatCanvasView: View {
                             .cornerRadius(7)
                     }
 
-                    // Model picker pill
-                    Menu {
-                        ForEach(appState.models) { m in
-                            Button {
-                                appState.selectedModel = m.id
-                            } label: {
-                                HStack {
-                                    Text(m.displayName)
-                                    if m.id == appState.selectedModel {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "cpu")
-                                .font(.system(size: 10))
-                            Text(shortModelName(appState.selectedModel))
-                                .font(.system(size: 11.5, weight: .medium))
-                                .lineLimit(1)
-                        }
-                        .foregroundColor(AgyTheme.textSecondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(AgyTheme.bgElevated)
-                        .cornerRadius(7)
-                    }
-
                     // Execution mode pill
                     Menu {
                         ForEach(ExecutionMode.allCases) { mode in
@@ -279,7 +378,7 @@ struct ChatCanvasView: View {
                                 .font(.system(size: 11.5, weight: .medium))
                         }
                         .foregroundColor(AgyTheme.accentIndigo)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(AgyTheme.accentIndigo.opacity(0.14))
                         .cornerRadius(7)
@@ -314,7 +413,7 @@ struct ChatCanvasView: View {
                                 .background(
                                     promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                         ? AnyShapeStyle(AgyTheme.bgElevated)
-                                        : AnyShapeStyle(AgyTheme.brandGradient)
+                                        : (appState.selectedEngine == .codex ? AnyShapeStyle(AgyTheme.codexGradient) : AnyShapeStyle(AgyTheme.brandGradient))
                                 )
                                 .clipShape(Circle())
                         }
@@ -328,15 +427,10 @@ struct ChatCanvasView: View {
             .cornerRadius(14)
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(AgyTheme.borderSubtle, lineWidth: 1))
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.bottom, 6)
         }
-        .background(AgyTheme.bgCanvas)
-    }
-
-    private func shortModelName(_ id: String) -> String {
-        appState.models.first(where: { $0.id == id })?.displayName
-            .replacingOccurrences(of: " (High)", with: "")
-            .replacingOccurrences(of: " (Medium)", with: "") ?? id
+        .padding(.top, 6)
+        .background(AgyTheme.bgSidebar.opacity(0.85))
     }
 }
 
@@ -344,24 +438,24 @@ struct TurnView: View {
     let turn: SessionTurn
     @State private var showThinking = false
 
+    private var engine: AgentEngine {
+        AgentEngine(rawValue: turn.engine ?? "antigravity") ?? .antigravity
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // User Prompt Bubble
             HStack {
                 Spacer(minLength: 36)
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text(turn.prompt)
-                        .font(.system(size: 14))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 10)
-                        .background(AgyTheme.accentIndigo.opacity(0.32))
-                        .cornerRadius(13)
-                        .overlay(RoundedRectangle(cornerRadius: 13).stroke(AgyTheme.accentIndigo.opacity(0.5), lineWidth: 1))
-                }
+                Text(turn.prompt)
+                    .font(.system(size: 14))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .background(AgyTheme.accentIndigo.opacity(0.32))
+                    .cornerRadius(13)
+                    .overlay(RoundedRectangle(cornerRadius: 13).stroke(AgyTheme.accentIndigo.opacity(0.5), lineWidth: 1))
             }
 
-            // Thinking Accordion
             if !turn.thinkingText.isEmpty {
                 DisclosureGroup(isExpanded: $showThinking) {
                     Text(turn.thinkingText)
@@ -372,7 +466,7 @@ struct TurnView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "brain.head.profile")
                             .foregroundColor(AgyTheme.accentIndigo)
-                        Text("Thought Process")
+                        Text("Reasoning (\(turn.effort ?? "auto"))")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(AgyTheme.textSecondary)
                     }
@@ -383,21 +477,34 @@ struct TurnView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(AgyTheme.borderSubtle, lineWidth: 1))
             }
 
-            // Tool Execution Steps
             ForEach(turn.toolSteps) { step in
                 ToolStepCard(step: step)
             }
 
-            // Agent Response
             if !turn.responseText.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
-                        Image(systemName: "sparkles")
+                        Image(systemName: engine.icon)
                             .font(.system(size: 12))
-                            .foregroundStyle(AgyTheme.brandGradient)
-                        Text("Antigravity")
+                            .foregroundStyle(engine == .codex ? AgyTheme.codexGradient : AgyTheme.brandGradient)
+                        Text(engine.displayName)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(AgyTheme.textSecondary)
+                        if let m = turn.model, !m.isEmpty {
+                            Text("• \(m)")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundColor(AgyTheme.textMuted)
+                                .lineLimit(1)
+                        }
+                        if let e = turn.effort, !e.isEmpty {
+                            Text(e.uppercased())
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundColor(ReasoningEffort(rawValue: e)?.color ?? AgyTheme.accentCyan)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(AgyTheme.bgElevated)
+                                .cornerRadius(4)
+                        }
                         Spacer()
                         Button {
                             UIPasteboard.general.string = turn.responseText
@@ -420,15 +527,14 @@ struct TurnView: View {
             } else if turn.status == "running" {
                 HStack(spacing: 8) {
                     ProgressView()
-                        .tint(AgyTheme.accentCyan)
-                    Text("Antigravity is working on your PC...")
+                        .tint(engine == .codex ? AgyTheme.accentCodex : AgyTheme.accentCyan)
+                    Text("\(engine.displayName) is working on your PC...")
                         .font(.system(size: 12.5))
                         .foregroundColor(AgyTheme.textSecondary)
                 }
                 .padding(10)
             }
 
-            // Footer stats
             if turn.status != "running" {
                 HStack(spacing: 10) {
                     Label(turn.status.uppercased(), systemImage: turn.status == "success" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")

@@ -29,13 +29,12 @@ final class WEPClient {
 
     init() {
         let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 20
+        cfg.timeoutIntervalForRequest = 25
         cfg.timeoutIntervalForResource = 120
         self.session = URLSession(configuration: cfg)
     }
 
     func resolveAndConnect(profile: HostProfile) async throws {
-        // Try LAN first with short timeout for instant speed at home, then fallback to Cloudflare Tunnel.
         if let lan = profile.lanUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !lan.isEmpty {
             if await probeHealth(baseURL: lan, token: profile.token, timeout: 1.1) {
                 activeBaseURL = lan.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -54,7 +53,6 @@ final class WEPClient {
             }
         }
 
-        // If neither probe responded immediately, set best available URL and throw.
         let fallback = (profile.tunnelUrl?.isEmpty == false ? profile.tunnelUrl : profile.lanUrl) ?? ""
         activeBaseURL = fallback.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         activeRouteLabel = "Offline"
@@ -127,15 +125,6 @@ final class WEPClient {
         }
     }
 
-    func sendWebSocketJSON(_ object: [String: Any]) async throws {
-        guard let task = webSocketTask else {
-            throw WEPError.notConfigured
-        }
-        let data = try JSONSerialization.data(withJSONObject: object)
-        guard let str = String(data: data, encoding: .utf8) else { return }
-        try await task.send(.string(str))
-    }
-
     private func handleRawWsMessage(_ text: String) {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -152,18 +141,57 @@ final class WEPClient {
         try await request(path: "/api/info", token: token)
     }
 
+    func getCursorLive(token: String) async throws -> CursorLiveState {
+        try await request(path: "/api/cursor/live", token: token)
+    }
+
+    func openInCursor(path: String, line: Int? = nil, token: String) async throws -> GenericActionResponse {
+        var body: [String: Any] = ["path": path]
+        if let line { body["line"] = line }
+        return try await request(path: "/api/cursor/open", method: "POST", jsonBody: body, token: token)
+    }
+
+    func listExtensions(token: String) async throws -> [ExtensionItem] {
+        try await request(path: "/api/extensions", token: token)
+    }
+
+    func installExtension(id: String, source: String = "cursor", token: String) async throws -> GenericActionResponse {
+        try await request(path: "/api/extensions/install", method: "POST", jsonBody: ["id": id, "source": source], token: token)
+    }
+
+    func uninstallExtension(id: String, source: String, token: String) async throws -> GenericActionResponse {
+        try await request(path: "/api/extensions/uninstall", method: "POST", jsonBody: ["id": id, "source": source], token: token)
+    }
+
+    func updateExtensions(token: String) async throws -> GenericActionResponse {
+        try await request(path: "/api/extensions/update", method: "POST", jsonBody: [:], token: token)
+    }
+
+    func togglePlugin(id: String, enable: Bool, token: String) async throws -> GenericActionResponse {
+        try await request(path: "/api/extensions/plugin-toggle", method: "POST", jsonBody: ["id": id, "source": "antigravity", "enable": enable], token: token)
+    }
+
+    func listCodexThreads(token: String) async throws -> [CodexThreadSummary] {
+        try await request(path: "/api/codex/threads", token: token)
+    }
+
+    func importCodexThread(threadId: String, title: String?, workspacePath: String?, model: String, effort: String, token: String) async throws -> SessionRecord {
+        var body: [String: Any] = ["threadId": threadId, "model": model, "effort": effort]
+        if let title { body["title"] = title }
+        if let workspacePath { body["workspacePath"] = workspacePath }
+        return try await request(path: "/api/codex/import", method: "POST", jsonBody: body, token: token)
+    }
+
     func listSessions(token: String) async throws -> [SessionRecord] {
         try await request(path: "/api/sessions", token: token)
     }
 
-    func getSession(id: String, token: String) async throws -> SessionRecord {
-        try await request(path: "/api/sessions/\(id)", token: token)
-    }
-
-    func createSession(workspacePath: String, model: String, mode: String, token: String) async throws -> SessionRecord {
+    func createSession(engine: String, workspacePath: String, model: String, effort: String, mode: String, token: String) async throws -> SessionRecord {
         let body: [String: Any] = [
+            "engine": engine,
             "workspacePath": workspacePath,
             "model": model,
+            "effort": effort,
             "mode": mode
         ]
         return try await request(path: "/api/sessions", method: "POST", jsonBody: body, token: token)
@@ -238,18 +266,22 @@ final class WEPClient {
 
     func startAgent(
         sessionId: String?,
+        engine: String,
         workspacePath: String,
         prompt: String,
         model: String,
+        effort: String,
         mode: String,
         skipPermissions: Bool,
         attachedFiles: [String],
         token: String
     ) async throws {
         var body: [String: Any] = [
+            "engine": engine,
             "workspacePath": workspacePath,
             "prompt": prompt,
             "model": model,
+            "effort": effort,
             "mode": mode,
             "skipPermissions": skipPermissions,
             "attachedFiles": attachedFiles

@@ -57,23 +57,41 @@ struct FileExplorerView: View {
 
                 if !currentPath.isEmpty {
                     let isWorkspace = currentPath.caseInsensitiveCompare(appState.activeWorkspace) == .orderedSame
-                    Button {
-                        Task {
-                            await appState.openFolderAsWorkspace(currentPath)
-                            appState.activeTab = .chat
+                    HStack(spacing: 8) {
+                        Button {
+                            Task {
+                                await appState.openFolderAsWorkspace(currentPath)
+                                appState.activeTab = .chat
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: isWorkspace ? "checkmark.circle.fill" : "folder.badge.plus")
+                                Text(isWorkspace ? "Active Workspace" : "Open Folder")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                Spacer()
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(isWorkspace ? AgyTheme.success.opacity(0.85) : AgyTheme.accentIndigo)
+                            .cornerRadius(8)
                         }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: isWorkspace ? "checkmark.circle.fill" : "folder.badge.plus")
-                            Text(isWorkspace ? "Active Antigravity Workspace (Tap to Chat)" : "Open This Folder in Antigravity")
-                                .font(.system(size: 12.5, weight: .semibold))
-                            Spacer()
+
+                        Button {
+                            Task { await appState.openInCursor(path: currentPath) }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "cursorarrow.rays")
+                                Text("Open in Cursor")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .foregroundColor(AgyTheme.accentCodex)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(AgyTheme.accentCodex.opacity(0.14))
+                            .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(AgyTheme.accentCodex.opacity(0.35), lineWidth: 1))
                         }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(isWorkspace ? AgyTheme.success.opacity(0.85) : AgyTheme.accentIndigo)
-                        .cornerRadius(8)
                     }
                 }
             }
