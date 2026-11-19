@@ -59,6 +59,18 @@ public sealed class WebApiServer : IAsyncDisposable
         _log = log;
 
         _agy.BroadcastEvent += BroadcastWsAsync;
+        _tunnel.StateChanged += OnTunnelStateChanged;
+    }
+
+    private void OnTunnelStateChanged()
+    {
+        if (!IsRunning || _wsClients.IsEmpty) return;
+        _ = BroadcastWsAsync("host.tunnel_updated", new
+        {
+            tunnelUrl = _tunnel.PublicUrl,
+            tunnelStatus = _tunnel.Status,
+            lanUrl = GetLanUrl()
+        });
     }
 
     public async Task StartAsync()
@@ -500,7 +512,10 @@ public sealed class WebApiServer : IAsyncDisposable
                 {
                     clientId,
                     deviceName = _config.Current.DeviceName,
-                    agyInstalled = _agy.IsAgyInstalled
+                    agyInstalled = _agy.IsAgyInstalled,
+                    codexInstalled = _agy.IsCodexInstalled,
+                    tunnelUrl = _tunnel.PublicUrl,
+                    lanUrl = GetLanUrl()
                 });
 
                 await ReceiveLoopAsync(clientId, ws);

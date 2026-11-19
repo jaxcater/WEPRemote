@@ -149,20 +149,46 @@ struct MainShellView: View {
                 }
             }
 
-            Button {
-                if let profile = appState.activeProfile {
-                    Task { await appState.connect(to: profile) }
-                } else {
-                    appState.showPairingSheet = true
+            Menu {
+                Section("Route Mode") {
+                    ForEach(RoutePreference.allCases) { pref in
+                        Button {
+                            Task { await appState.setRoutePreference(pref) }
+                        } label: {
+                            HStack {
+                                Text(pref.label)
+                                if appState.routePreference == pref {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+                Section {
+                    Button {
+                        if let profile = appState.activeProfile {
+                            Task { await appState.connect(to: profile) }
+                        } else {
+                            appState.showPairingSheet = true
+                        }
+                    } label: {
+                        Label("Reconnect Now", systemImage: "arrow.clockwise")
+                    }
+
+                    Button {
+                        appState.showPairingSheet = true
+                    } label: {
+                        Label("Pair / Edit Tunnel & LAN URL", systemImage: "qrcode.viewfinder")
+                    }
                 }
             } label: {
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(appState.isConnected ? AgyTheme.success : AgyTheme.danger)
+                        .fill(appState.isConnected ? AgyTheme.success : (appState.isConnecting ? AgyTheme.warning : AgyTheme.danger))
                         .frame(width: 7, height: 7)
-                    Text(appState.isConnected ? appState.connectionRoute : "Offline")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(AgyTheme.textSecondary)
+                    Text(appState.isConnected ? appState.connectionRoute : (appState.isConnecting ? "Connecting..." : "Offline"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(appState.connectionRoute == "Tunnel" ? AgyTheme.accentCyan : AgyTheme.textSecondary)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 enum WEPError: LocalizedError {
     case notConfigured
@@ -16,16 +17,49 @@ enum WEPError: LocalizedError {
     }
 }
 
+enum RoutePreference: String, CaseIterable, Codable, Identifiable {
+    case auto = "auto"
+    case preferTunnel = "tunnel"
+    case preferLan = "lan"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto (Smart LAN / Tunnel)"
+        case .preferTunnel: return "Force Tunnel (4G / Remote)"
+        case .preferLan: return "Prefer LAN (Home Wi-Fi)"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .auto: return "Auto"
+        case .preferTunnel: return "Tunnel"
+        case .preferLan: return "LAN"
+        }
+    }
+}
+
 final class WEPClient {
-    private let session: URLSession
+    private let apiSession: URLSession
+    private let probeSession: URLSession
+
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+
+    private var pathMonitor: NWPathMonitor?
+    private let monitorQueue = DispatchQueue(label: "com.wep.remote.pathmonitor")
+    private var lastNetworkSignature: String = ""
+    private(set) var isCellularOnly: Bool = false
+
     private var activeProfile: HostProfile?
     private var shouldMaintainConnection = false
     private var reconnectAttempt = 0
 
+    var routePreference: RoutePreference = .auto
     private(set) var activeBaseURL: String = ""
     private(set) var activeRouteLabel: String = "Disconnected"
 
@@ -33,11 +67,76 @@ final class WEPClient {
     var onConnectionStateChange: ((Bool, String) -> Void)?
 
     init() {
-        let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 25
-        cfg.timeoutIntervalForResource = 120
-        cfg.waitsForConnectivity = true
-        self.session = URLSession(configuration: cfg)
+        // CRITICAL: waitsForConnectivity MUST be false so unreachable LAN IPs fail immediately
+        // instead of hanging up to 120 seconds when on 4G/5G or an external Wi-Fi network.
+        let apiCfg = URLSessionConfiguration.default
+        apiCfg.timeoutIntervalForRequest = 14
+        apiCfg.timeoutIntervalForResource = 90
+        apiCfg.waitsForConnectivity = false
+        apiCfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        self.apiSession = URLSession(configuration: apiCfg)
+
+        let probeCfg = URLSessionConfiguration.ephemeral
+        probeCfg.timeoutIntervalForRequest = 4
+        probeCfg.timeoutIntervalForResource = 6
+        probeCfg.waitsForConnectivity = false
+        probeCfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        self.probeSession = URLSession(configuration: probeCfg)
+
+        startNetworkPathMonitor()
+    }
+
+    deinit {
+        pathMonitor?.cancel()
+    }
+
+    static func normalizeBaseURL(_ raw: String?, isTunnel: Bool) -> String {
+        guard let raw else { return "" }
+        var clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !clean.isEmpty else { return "" }
+
+        if !clean.lowercased().hasPrefix("http://") && !clean.lowercased().hasPrefix("https://") {
+            if isTunnel || clean.lowercased().contains(".trycloudflare.com") {
+                clean = "https://\(clean)"
+            } else {
+                clean = "http://\(clean)"
+            }
+        }
+        return clean
+    }
+
+    private func startNetworkPathMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let usesWifi = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
+            let usesCell = path.usesInterfaceType(.cellular)
+            self.isCellularOnly = usesCell && !usesWifi
+
+            let ifaces = path.availableInterfaces.map(\.name).joined(separator: ",")
+            let sig = "\(path.status)-wifi:\(usesWifi)-cell:\(usesCell)-\(ifaces)"
+            let previousSig = self.lastNetworkSignature
+            self.lastNetworkSignature = sig
+
+            guard !previousSig.isEmpty, previousSig != sig else { return }
+            guard self.shouldMaintainConnection, self.activeProfile != nil else { return }
+
+            // Network interface changed (e.g. Wi-Fi -> 4G/5G or vice versa): switch route immediately!
+            self.triggerImmediateRouteSwitch()
+        }
+        monitor.start(queue: monitorQueue)
+        self.pathMonitor = monitor
+    }
+
+    func triggerImmediateRouteSwitch() {
+        guard shouldMaintainConnection, activeProfile != nil else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        teardownSocketOnly()
+        reconnectAttempt = 0
+        onConnectionStateChange?(false, "Switching...")
+        scheduleReconnect(immediate: true)
     }
 
     func resolveAndConnect(profile: HostProfile) async throws {
@@ -55,29 +154,95 @@ final class WEPClient {
 
     @discardableResult
     func resolveReachableBaseURL(profile: HostProfile) async throws -> (baseURL: String, routeLabel: String) {
-        if let lan = profile.lanUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !lan.isEmpty {
-            if await probeHealth(baseURL: lan, token: profile.token, timeout: 1.4) {
-                let clean = lan.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                activeBaseURL = clean
-                activeRouteLabel = "LAN"
-                return (clean, "LAN")
-            }
-        }
+        let lan = Self.normalizeBaseURL(profile.lanUrl, isTunnel: false)
+        let tunnel = Self.normalizeBaseURL(profile.tunnelUrl, isTunnel: true)
+        let token = profile.token
 
-        if let tunnel = profile.tunnelUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !tunnel.isEmpty {
-            if await probeHealth(baseURL: tunnel, token: profile.token, timeout: 6.0) {
-                let clean = tunnel.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                activeBaseURL = clean
+        // 1. If on 4G/5G cellular or user explicitly prefers Tunnel, try Tunnel first with zero LAN delay.
+        if (routePreference == .preferTunnel || isCellularOnly), !tunnel.isEmpty {
+            if await probeHealth(baseURL: tunnel, token: token, timeout: 6.5) {
+                activeBaseURL = tunnel
                 activeRouteLabel = "Tunnel"
-                return (clean, "Tunnel")
+                return (tunnel, "Tunnel")
+            }
+            if !lan.isEmpty, !isCellularOnly, await probeHealth(baseURL: lan, token: token, timeout: 1.0) {
+                activeBaseURL = lan
+                activeRouteLabel = "LAN"
+                return (lan, "LAN")
+            }
+        }
+        // 2. If user explicitly prefers LAN, try quick LAN probe then Tunnel.
+        else if routePreference == .preferLan {
+            if !lan.isEmpty, await probeHealth(baseURL: lan, token: token, timeout: 1.2) {
+                activeBaseURL = lan
+                activeRouteLabel = "LAN"
+                return (lan, "LAN")
+            }
+            if !tunnel.isEmpty, await probeHealth(baseURL: tunnel, token: token, timeout: 6.5) {
+                activeBaseURL = tunnel
+                activeRouteLabel = "Tunnel"
+                return (tunnel, "Tunnel")
+            }
+        }
+        // 3. Smart Auto Mode: when BOTH LAN and Tunnel exist, race them IN PARALLEL so Tunnel
+        // never waits for LAN to time out on external Wi-Fi networks!
+        else if !lan.isEmpty && !tunnel.isEmpty {
+            if let winner = await raceLanAndTunnel(lan: lan, tunnel: tunnel, token: token) {
+                activeBaseURL = winner.baseURL
+                activeRouteLabel = winner.routeLabel
+                return winner
+            }
+        }
+        // 4. Single-URL profile (only Tunnel or only LAN configured).
+        else if !tunnel.isEmpty {
+            if await probeHealth(baseURL: tunnel, token: token, timeout: 6.5) {
+                activeBaseURL = tunnel
+                activeRouteLabel = "Tunnel"
+                return (tunnel, "Tunnel")
+            }
+        } else if !lan.isEmpty {
+            if await probeHealth(baseURL: lan, token: token, timeout: 1.5) {
+                activeBaseURL = lan
+                activeRouteLabel = "LAN"
+                return (lan, "LAN")
             }
         }
 
-        let fallback = (profile.tunnelUrl?.isEmpty == false ? profile.tunnelUrl : profile.lanUrl) ?? ""
-        activeBaseURL = fallback.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let fallback = !tunnel.isEmpty ? tunnel : lan
+        activeBaseURL = fallback
         activeRouteLabel = "Offline"
         onConnectionStateChange?(false, "Offline")
-        throw WEPError.httpError(0, "Could not reach Windows host via LAN or Cloudflare Tunnel.")
+        throw WEPError.httpError(0, "Could not reach Windows host via Cloudflare Tunnel or LAN.")
+    }
+
+    private func raceLanAndTunnel(lan: String, tunnel: String, token: String) async -> (baseURL: String, routeLabel: String)? {
+        await withTaskGroup(of: (String, String, Bool).self) { group in
+            group.addTask {
+                let ok = await self.probeHealth(baseURL: lan, token: token, timeout: 0.95)
+                return (lan, "LAN", ok)
+            }
+            group.addTask {
+                let ok = await self.probeHealth(baseURL: tunnel, token: token, timeout: 6.5)
+                return (tunnel, "Tunnel", ok)
+            }
+
+            var tunnelWinner: (String, String)?
+            for await (url, label, ok) in group {
+                if ok {
+                    if label == "LAN" {
+                        group.cancelAll()
+                        return (url, label)
+                    } else {
+                        // Tunnel succeeded first! Wait a tiny 120ms grace window in case home LAN is also reachable,
+                        // otherwise immediately pick Tunnel and cancel LAN probe.
+                        tunnelWinner = (url, label)
+                        group.cancelAll()
+                        return (url, label)
+                    }
+                }
+            }
+            return tunnelWinner
+        }
     }
 
     func disconnectWebSocket() {
@@ -100,15 +265,29 @@ final class WEPClient {
     private func probeHealth(baseURL: String, token: String, timeout: TimeInterval) async -> Bool {
         let clean = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(clean)/api/health") else { return false }
-        var req = URLRequest(url: url, timeoutInterval: timeout)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        do {
-            let (data, resp) = try await session.data(for: req)
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return false }
-            let health = try JSONDecoder().decode(HealthResponse.self, from: data)
-            return health.ok && (health.authenticated ?? false)
-        } catch {
-            return false
+
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
+                req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                do {
+                    let (data, resp) = try await self.probeSession.data(for: req)
+                    guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return false }
+                    let health = try JSONDecoder().decode(HealthResponse.self, from: data)
+                    return health.ok && (health.authenticated ?? false)
+                } catch {
+                    return false
+                }
+            }
+            group.addTask {
+                let ns = UInt64(max(0.2, timeout) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: ns)
+                return false
+            }
+
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
         }
     }
 
@@ -124,22 +303,19 @@ final class WEPClient {
             return
         }
 
-        let task = session.webSocketTask(with: wsURL)
+        let task = apiSession.webSocketTask(with: wsURL)
         self.webSocketTask = task
         task.resume()
         onConnectionStateChange?(true, activeRouteLabel)
 
         pingTask = Task { [weak self, weak task] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
                 guard !Task.isCancelled, let self, let task, self.webSocketTask === task else { break }
-                let pingFailed = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-                    task.sendPing { error in
-                        cont.resume(returning: error != nil)
-                    }
-                }
+                let pingFailed = await self.sendPingWithTimeout(task: task, timeoutSeconds: 3.0)
                 if pingFailed {
-                    self.scheduleReconnect()
+                    self.onConnectionStateChange?(false, "Switching...")
+                    self.scheduleReconnect(immediate: true)
                     break
                 }
             }
@@ -164,7 +340,7 @@ final class WEPClient {
                 } catch {
                     if !Task.isCancelled {
                         self.onConnectionStateChange?(false, "Reconnecting...")
-                        self.scheduleReconnect()
+                        self.scheduleReconnect(immediate: true)
                     }
                     break
                 }
@@ -172,7 +348,26 @@ final class WEPClient {
         }
     }
 
-    private func scheduleReconnect() {
+    private func sendPingWithTimeout(task: URLSessionWebSocketTask, timeoutSeconds: TimeInterval) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                    task.sendPing { error in
+                        cont.resume(returning: error != nil)
+                    }
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+                return true // Timed out -> failed
+            }
+            let failed = await group.next() ?? true
+            group.cancelAll()
+            return failed
+        }
+    }
+
+    private func scheduleReconnect(immediate: Bool = false) {
         guard shouldMaintainConnection, let profile = activeProfile else { return }
         guard reconnectTask == nil else { return }
 
@@ -180,25 +375,36 @@ final class WEPClient {
             guard let self else { return }
             defer { self.reconnectTask = nil }
 
+            var isFirstLoop = immediate
             while !Task.isCancelled && self.shouldMaintainConnection {
-                let attempt = min(self.reconnectAttempt, 4)
-                self.reconnectAttempt += 1
-                let delaySeconds = UInt64(min(2 * (1 << attempt), 20))
-                try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
+                if !isFirstLoop {
+                    let attempt = min(self.reconnectAttempt, 4)
+                    self.reconnectAttempt += 1
+                    let delaySeconds = UInt64(min(1 * (1 << attempt), 10))
+                    try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
+                } else {
+                    isFirstLoop = false
+                }
+
                 if Task.isCancelled || !self.shouldMaintainConnection { break }
 
                 do {
-                    let resolved = try await self.resolveReachableBaseURL(profile: profile)
+                    let latestProfile = self.activeProfile ?? profile
+                    let resolved = try await self.resolveReachableBaseURL(profile: latestProfile)
                     self.activeBaseURL = resolved.baseURL
                     self.activeRouteLabel = resolved.routeLabel
                     self.reconnectAttempt = 0
-                    self.connectWebSocket(baseURL: resolved.baseURL, token: profile.token)
+                    self.connectWebSocket(baseURL: resolved.baseURL, token: latestProfile.token)
                     return
                 } catch {
                     // Continue retrying until connected or disconnected explicitly.
                 }
             }
         }
+    }
+
+    func updateActiveProfile(_ profile: HostProfile) {
+        self.activeProfile = profile
     }
 
     private func handleRawWsMessage(_ text: String) {
@@ -390,6 +596,37 @@ final class WEPClient {
         path: String,
         method: String = "GET",
         jsonBody: [String: Any]? = nil,
+        token: String,
+        allowFailoverRetry: Bool = true
+    ) async throws -> T {
+        if activeBaseURL.isEmpty, let profile = activeProfile {
+            _ = try await resolveReachableBaseURL(profile: profile)
+        }
+
+        do {
+            return try await performSingleRequest(path: path, method: method, jsonBody: jsonBody, token: token)
+        } catch let error as WEPError {
+            throw error
+        } catch {
+            // Network/transport failure (e.g., switched from LAN Wi-Fi to 4G/5G or another Wi-Fi):
+            // Immediately resolve reachable route (LAN <-> Tunnel) and retry once!
+            if allowFailoverRetry, let profile = activeProfile {
+                let previousBase = activeBaseURL
+                if let resolved = try? await resolveReachableBaseURL(profile: profile) {
+                    if resolved.baseURL != previousBase {
+                        connectWebSocket(baseURL: resolved.baseURL, token: profile.token)
+                    }
+                    return try await performSingleRequest(path: path, method: method, jsonBody: jsonBody, token: token)
+                }
+            }
+            throw error
+        }
+    }
+
+    private func performSingleRequest<T: Decodable>(
+        path: String,
+        method: String,
+        jsonBody: [String: Any]?,
         token: String
     ) async throws -> T {
         guard !activeBaseURL.isEmpty, let url = URL(string: activeBaseURL + path) else {
@@ -398,6 +635,7 @@ final class WEPClient {
 
         var req = URLRequest(url: url)
         req.httpMethod = method
+        req.timeoutInterval = (activeRouteLabel == "LAN") ? 5.0 : 16.0
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         if let jsonBody {
@@ -405,7 +643,7 @@ final class WEPClient {
             req.httpBody = try JSONSerialization.data(withJSONObject: jsonBody)
         }
 
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await apiSession.data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw WEPError.httpError(0, "Invalid HTTP response")
         }

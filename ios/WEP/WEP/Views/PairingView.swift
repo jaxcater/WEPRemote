@@ -48,6 +48,15 @@ struct PairingView: View {
                     SecureField("Access Token (wep_...)", text: $token)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+
+                    Picker("Route Preference", selection: Binding(
+                        get: { appState.routePreference },
+                        set: { pref in Task { await appState.setRoutePreference(pref) } }
+                    )) {
+                        ForEach(RoutePreference.allCases) { pref in
+                            Text(pref.label).tag(pref)
+                        }
+                    }
                 }
                 .listRowBackground(AgyTheme.bgCard)
 
@@ -85,20 +94,37 @@ struct PairingView: View {
                     Section("Saved PCs") {
                         ForEach(appState.profiles) { profile in
                             Button {
+                                name = profile.name
+                                tunnelUrl = profile.tunnelUrl ?? ""
+                                lanUrl = profile.lanUrl ?? ""
+                                token = profile.token
                                 Task {
                                     await appState.connect(to: profile)
                                     if appState.isConnected { dismiss() }
                                 }
                             } label: {
                                 HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
+                                    VStack(alignment: .leading, spacing: 3) {
                                         Text(profile.name)
                                             .font(.system(size: 14, weight: .semibold))
                                             .foregroundColor(AgyTheme.textPrimary)
-                                        Text(profile.tunnelUrl ?? profile.lanUrl ?? "")
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundColor(AgyTheme.textMuted)
-                                            .lineLimit(1)
+                                        if let t = profile.tunnelUrl, !t.isEmpty {
+                                            Text("Tunnel: \(t)")
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(AgyTheme.accentCyan)
+                                                .lineLimit(1)
+                                        } else {
+                                            Text("No Tunnel URL saved (re-scan QR with Tunnel active)")
+                                                .font(.system(size: 11))
+                                                .foregroundColor(AgyTheme.warning)
+                                                .lineLimit(1)
+                                        }
+                                        if let l = profile.lanUrl, !l.isEmpty {
+                                            Text("LAN: \(l)")
+                                                .font(.system(size: 10.5, design: .monospaced))
+                                                .foregroundColor(AgyTheme.textMuted)
+                                                .lineLimit(1)
+                                        }
                                     }
                                     Spacer()
                                     if appState.activeProfile?.id == profile.id && appState.isConnected {
@@ -146,6 +172,14 @@ struct PairingView: View {
                     parsePairingJSON(scanned)
                 }
             }
+            .onAppear {
+                if token.isEmpty, let current = appState.activeProfile {
+                    name = current.name
+                    tunnelUrl = current.tunnelUrl ?? ""
+                    lanUrl = current.lanUrl ?? ""
+                    token = current.token
+                }
+            }
         }
     }
 
@@ -156,8 +190,8 @@ struct PairingView: View {
             return
         }
         name = payload.name
-        tunnelUrl = payload.tunnelUrl ?? ""
-        lanUrl = payload.lanUrl ?? ""
+        tunnelUrl = WEPClient.normalizeBaseURL(payload.tunnelUrl, isTunnel: true)
+        lanUrl = WEPClient.normalizeBaseURL(payload.lanUrl, isTunnel: false)
         token = payload.token
         statusText = "Pairing info loaded. Connecting..."
         Task { await connectNow() }
@@ -166,10 +200,10 @@ struct PairingView: View {
     private func connectNow() async {
         let profile = HostProfile(
             name: name.isEmpty ? "Home PC" : name,
-            tunnelUrl: tunnelUrl.trimmingCharacters(in: .whitespacesAndNewlines),
-            lanUrl: lanUrl.trimmingCharacters(in: .whitespacesAndNewlines),
+            tunnelUrl: WEPClient.normalizeBaseURL(tunnelUrl, isTunnel: true),
+            lanUrl: WEPClient.normalizeBaseURL(lanUrl, isTunnel: false),
             token: token.trimmingCharacters(in: .whitespacesAndNewlines),
-            version: "1.0.0"
+            version: "2.1.0"
         )
         await appState.addOrUpdateAndConnect(profile: profile)
         if appState.isConnected {

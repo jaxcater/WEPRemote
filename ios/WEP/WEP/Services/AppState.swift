@@ -32,11 +32,18 @@ final class AppState: ObservableObject {
     private let notifyForegroundKey = "wep.notify.foreground.v1"
     private let turnSnapshotsKey = "wep.turn.snapshots.v1"
     private let pendingOfflinePromptsKey = "wep.pending.offline.prompts.v1"
+    private let routePreferenceKey = "wep.route.preference.v1"
 
     let client = WEPClient()
 
     @Published var profiles: [HostProfile] = []
     @Published var activeProfile: HostProfile?
+    @Published var routePreference: RoutePreference = .auto {
+        didSet {
+            client.routePreference = routePreference
+            UserDefaults.standard.set(routePreference.rawValue, forKey: routePreferenceKey)
+        }
+    }
 
     @Published var isConnected = false
     @Published var connectionRoute = "Disconnected"
@@ -180,6 +187,11 @@ final class AppState: ObservableObject {
         if defaults.object(forKey: notifyForegroundKey) != nil {
             notifyWhenInForeground = defaults.bool(forKey: notifyForegroundKey)
         }
+        if let rawPref = defaults.string(forKey: routePreferenceKey),
+           let pref = RoutePreference(rawValue: rawPref) {
+            routePreference = pref
+            client.routePreference = pref
+        }
         if let data = defaults.data(forKey: turnSnapshotsKey),
            let decoded = try? JSONDecoder().decode([String: TurnStateSnapshot].self, from: data) {
             turnSnapshots = decoded
@@ -314,18 +326,30 @@ final class AppState: ObservableObject {
         saveProfiles()
     }
 
+    func setRoutePreference(_ pref: RoutePreference) async {
+        routePreference = pref
+        client.routePreference = pref
+        if let profile = activeProfile {
+            await connect(to: profile)
+        }
+    }
+
     func connect(to profile: HostProfile) async {
         activeProfile = profile
+        client.updateActiveProfile(profile)
         saveProfiles()
         isConnecting = true
         connectionError = nil
 
         do {
             try await client.resolveAndConnect(profile: profile)
+            self.isConnected = true
+            self.connectionRoute = client.activeRouteLabel
             await refreshHostData()
         } catch {
             connectionError = error.localizedDescription
             isConnected = false
+            connectionRoute = client.activeRouteLabel
         }
         isConnecting = false
     }
@@ -350,12 +374,14 @@ final class AppState: ObservableObject {
 
             if var current = activeProfile {
                 var updated = false
-                if let t = info.tunnelUrl, !t.isEmpty, t != current.tunnelUrl {
-                    current.tunnelUrl = t
+                let freshTunnel = WEPClient.normalizeBaseURL(info.tunnelUrl, isTunnel: true)
+                let freshLan = WEPClient.normalizeBaseURL(info.lanUrl, isTunnel: false)
+                if !freshTunnel.isEmpty, freshTunnel != current.tunnelUrl {
+                    current.tunnelUrl = freshTunnel
                     updated = true
                 }
-                if let l = info.lanUrl, !l.isEmpty, l != current.lanUrl {
-                    current.lanUrl = l
+                if !freshLan.isEmpty, freshLan != current.lanUrl {
+                    current.lanUrl = freshLan
                     updated = true
                 }
                 if updated {
@@ -363,9 +389,14 @@ final class AppState: ObservableObject {
                         profiles[idx] = current
                     }
                     activeProfile = current
+                    client.updateActiveProfile(current)
                     saveProfiles()
                 }
             }
+
+            self.isConnected = true
+            self.connectionRoute = client.activeRouteLabel
+            self.connectionError = nil
 
             let loadedSessions = try await client.listSessions(token: token)
             applyLoadedSessions(loadedSessions, notifyChanges: true)
@@ -875,6 +906,31 @@ final class AppState: ObservableObject {
     }
 
     private func handleWsEvent(type: String, payload: [String: Any]) {
+        if type == "host.tunnel_updated" || type == "host.connected" {
+            let freshTunnel = WEPClient.normalizeBaseURL(payload["tunnelUrl"] as? String, isTunnel: true)
+            let freshLan = WEPClient.normalizeBaseURL(payload["lanUrl"] as? String, isTunnel: false)
+            if var current = activeProfile {
+                var updated = false
+                if !freshTunnel.isEmpty, freshTunnel != current.tunnelUrl {
+                    current.tunnelUrl = freshTunnel
+                    updated = true
+                }
+                if !freshLan.isEmpty, freshLan != current.lanUrl {
+                    current.lanUrl = freshLan
+                    updated = true
+                }
+                if updated {
+                    if let idx = profiles.firstIndex(where: { $0.id == current.id }) {
+                        profiles[idx] = current
+                    }
+                    activeProfile = current
+                    client.updateActiveProfile(current)
+                    saveProfiles()
+                }
+            }
+            return
+        }
+
         guard let sessionId = payload["sessionId"] as? String else { return }
 
         if type == "agent.turn_queued" || type == "agent.turn_started" {

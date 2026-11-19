@@ -138,6 +138,10 @@ public sealed partial class TunnelService : IDisposable
             {
                 psi.ArgumentList.Add("tunnel");
                 psi.ArgumentList.Add("--no-autoupdate");
+                psi.ArgumentList.Add("--protocol");
+                psi.ArgumentList.Add("http2");
+                psi.ArgumentList.Add("--edge-ip-version");
+                psi.ArgumentList.Add("4");
                 psi.ArgumentList.Add("run");
                 psi.ArgumentList.Add("--token");
                 psi.ArgumentList.Add(_config.Current.CloudflareTunnelToken.Trim());
@@ -150,6 +154,10 @@ public sealed partial class TunnelService : IDisposable
             {
                 psi.ArgumentList.Add("tunnel");
                 psi.ArgumentList.Add("--no-autoupdate");
+                psi.ArgumentList.Add("--protocol");
+                psi.ArgumentList.Add("http2");
+                psi.ArgumentList.Add("--edge-ip-version");
+                psi.ArgumentList.Add("4");
                 psi.ArgumentList.Add("--url");
                 psi.ArgumentList.Add($"http://127.0.0.1:{_config.Current.Port}");
                 PublicUrl = null;

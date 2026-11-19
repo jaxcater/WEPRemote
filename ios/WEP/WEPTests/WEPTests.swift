@@ -161,4 +161,15 @@ final class WEPTests: XCTestCase {
         XCTAssertEqual(events[1].kind, .decision)
         XCTAssertEqual(events[1].turnId, "t-decision")
     }
+
+    func testNormalizeBaseURLAddsExpectedScheme() {
+        XCTAssertEqual(
+            WEPClient.normalizeBaseURL("demo-tunnel.trycloudflare.com/", isTunnel: true),
+            "https://demo-tunnel.trycloudflare.com"
+        )
+        XCTAssertEqual(
+            WEPClient.normalizeBaseURL("192.168.1.25:8420/", isTunnel: false),
+            "http://192.168.1.25:8420"
+        )
+    }
 }
